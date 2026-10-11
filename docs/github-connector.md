@@ -28,70 +28,98 @@ disposable pilot repo.
 
 Receipts store `body_sha256` digests — not comment body plaintext or tokens.
 
-## Six-step pilot recipe
+## Operator recipe
 
-Assume a local relay, `NOSTR_NSEC`, and registry entry:
-
-```yaml
-github_repo_allowlist:
-  - your-org/disposable-pilot-repo
-model_allowlist:
-  - sha256:demo-model
-```
+First build and start the local relay from [the operator
+walkthrough](operator-walkthrough.md). For this connector run, use a new scratch
+directory and generate the exact repository grant at setup:
 
 ```bash
-export NOSTR_NSEC='…'                    # Doppler / secret manager
-export MEMBRANE_RELAY_URL='ws://127.0.0.1:7777'
-export MEMBRANE_GITHUB_TOKEN='…'         # never print / commit
-
-# 1) Issue short-lived IAC — comment allowed, merge omitted
-membrane iac issue \
-  --model sha256:demo-model \
-  --ttl-secs 900 \
-  --tool github.comment \
-  --out session-iac.json
-
-# 2) Start gate (same signing key as IAC issuer)
-membrane gate start \
-  --registry tools/channel-registry.example.yaml \
-  --iac session-iac.json \
-  --listen 127.0.0.1:8787
-
-# 3) Allowed: create a comment
-membrane tools invoke \
-  --iac session-iac.json \
-  --tool github.comment \
-  --model sha256:demo-model \
-  --owner your-org \
-  --repo disposable-pilot-repo \
-  --issue-number 1 \
-  --body "Membrane pilot: allowed comment"
-
-# 4) Blocked: merge before any GitHub call
-membrane tools invoke \
-  --iac session-iac.json \
-  --tool github.merge \
-  --model sha256:demo-model \
-  --owner your-org \
-  --repo disposable-pilot-repo \
-  --pull-number 1
-# → HTTP 403, blocked-action receipt / SIEM event
-
-# 5) Sever → subsequent invokes fail closed
-membrane sever --scope-id "$(jq -r .scope_id session-iac.json)"
-
-# 6) Evidence / SIEM
-membrane evidence export --format jsonl --since-secs 3600 --out membrane-siem.jsonl
+export PILOT_DIR="$(mktemp -d)"
+export MEMBRANE_OPERATION_DIR="$PILOT_DIR/operations"
+export OWNER='your-org'
+export REPO='disposable-pilot-repo'
+cargo run --locked -q -p membrane-cli --example operator-request -- \
+  setup "$PILOT_DIR" "$OWNER/$REPO"
+export GATE_PUBKEY="$(jq -r .operator_pubkey "$PILOT_DIR/keys.json")"
+export CALLER_PUBKEY="$(jq -r .caller_pubkey "$PILOT_DIR/keys.json")"
+export NOSTR_NSEC="$(jq -r .operator_nsec "$PILOT_DIR/keys.json")"
 ```
 
-Optional curl equivalent for step 3:
+Use a disposable repository you control, with an existing issue #1. Load
+`MEMBRANE_GITHUB_TOKEN` into the gate environment from your secret manager. Never
+print or commit it. Unlike the local model check, the allowed comment below is a
+live GitHub write. The setup helper grants only this repository, exact scope and
+model to the caller; the global repository allowlist must match too.
 
 ```bash
-curl -sS http://127.0.0.1:8787/v1/tools/invoke \
-  -H 'Content-Type: application/json' \
-  -H "X-Membrane-IAC: $(cat session-iac.json)" \
-  -d '{"tool":"github.comment","model":"sha256:demo-model","owner":"your-org","repo":"disposable-pilot-repo","issue_number":1,"body":"hello"}'
+# Issue as operator. Merge is deliberately omitted.
+membrane iac issue --caller-pubkey "$CALLER_PUBKEY" \
+  --scope-id pilot-scope --model sha256:demo-model --ttl-secs 900 \
+  --tool github.comment --tool github.issue.read --out "$PILOT_DIR/iac.json"
+membrane gate start --registry "$PILOT_DIR/registry.yaml" \
+  --iac "$PILOT_DIR/iac.json" --listen 127.0.0.1:8787 \
+  > "$PILOT_DIR/gate.log" 2>&1 &
+export GATE_PID=$!
 ```
+
+Wait for `/health` to respond and confirm `github_connector.token_configured`
+is true. Keep the token only in the gate process, not the caller environment.
+
+```bash
+# Switch to caller. The CLI verifies the operator IAC and signs a fresh proof.
+unset MEMBRANE_GITHUB_TOKEN GITHUB_TOKEN
+export NOSTR_NSEC="$(jq -r .caller_nsec "$PILOT_DIR/keys.json")"
+membrane tools invoke --gate-pubkey "$GATE_PUBKEY" --iac "$PILOT_DIR/iac.json" \
+  --tool github.issue.read --model sha256:demo-model \
+  --owner "$OWNER" --repo "$REPO" --issue-number 1
+
+# Allowed write. Choose one ID for this intended write, then keep it on retry.
+export COMMENT_OPERATION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+membrane tools invoke --gate-pubkey "$GATE_PUBKEY" --iac "$PILOT_DIR/iac.json" \
+  --tool github.comment --operation-id "$COMMENT_OPERATION_ID" \
+  --model sha256:demo-model --owner "$OWNER" --repo "$REPO" \
+  --issue-number 1 --body 'Membrane pilot: allowed comment'
+
+# Blocked by the IAC before any GitHub merge request.
+membrane tools invoke --gate-pubkey "$GATE_PUBKEY" --iac "$PILOT_DIR/iac.json" \
+  --tool github.merge --operation-id "blocked-merge-$COMMENT_OPERATION_ID" \
+  --model sha256:demo-model --owner "$OWNER" --repo "$REPO" --pull-number 1
+# Expected: HTTP 403 and nonzero CLI exit.
+
+# Sever as operator; subsequent fresh-proof invokes on this scope fail closed.
+NOSTR_NSEC="$(jq -r .operator_nsec "$PILOT_DIR/keys.json")" \
+  membrane sever --scope-id pilot-scope
+membrane evidence export --format jsonl --since-secs 3600 \
+  --out "$PILOT_DIR/evidence.jsonl"
+```
+
+Severance is relay-backed; allow the gate's subscriber to observe it before
+checking the subsequent denial. Do not auto-retry a write with a new operation
+ID. Inspect GitHub and the journal first if a result is uncertain.
+
+### Signed curl equivalent
+
+This sends a live comment. Use it instead of the CLI comment above, not in
+addition, unless a second comment is intended. Choose a stable operation ID and
+keep the body unchanged after signing:
+
+```bash
+jq -n --arg owner "$OWNER" --arg repo "$REPO" \
+  --arg operation_id "$COMMENT_OPERATION_ID" \
+  '{tool:"github.comment",operation_id:$operation_id,model:"sha256:demo-model",owner:$owner,repo:$repo,issue_number:1,body:"Membrane pilot: allowed comment"}' \
+  > "$PILOT_DIR/comment.json"
+cargo run --locked -q -p membrane-cli --example operator-request -- sign \
+  http://127.0.0.1:8787 "$GATE_PUBKEY" "$PILOT_DIR/iac.json" \
+  /v1/tools/invoke "$PILOT_DIR/comment.json" "$PILOT_DIR/request"
+curl -fsS http://127.0.0.1:8787/v1/tools/invoke \
+  --header @"$PILOT_DIR/request/headers.txt" \
+  --data-binary @"$PILOT_DIR/request/body.json"
+```
+
+The helper emits both the IAC and fresh caller-proof headers and the typed body
+that was signed. Send within 60 seconds. Stop the gate and local relay after the
+pilot; retain evidence and journal state until writes are reconciled.
 
 ## Connector execution and demo
 
