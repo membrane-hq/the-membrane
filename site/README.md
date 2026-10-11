@@ -79,4 +79,3 @@ See `deploy/grasp/update-tunnel-ingress.sh` for the tunnel pattern used elsewher
 | Deferred | Why |
 |----------|-----|
 | Production controls | The public demo is separate from the operator deployment |
-| Nostr / BCI / ZK deep research pitch | Out of scope for product landing |
