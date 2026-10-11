@@ -11,7 +11,7 @@ model_allowlist:
 
 delta_t_secs: 300
 
-# Model API base URL (chat/completions wire format at /v1/chat/completions; mock if unreachable)
+# Model API base URL (chat/completions wire format at /v1/chat/completions; fails closed if unreachable; MEMBRANE_DEV_MOCK_MODEL=1 enables a local dev mock)
 model_api_url: http://127.0.0.1:8080
 
 # GitHub connector (POST /v1/tools/invoke). Empty = deny all repos (fail closed).
