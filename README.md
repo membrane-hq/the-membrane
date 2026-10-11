@@ -86,89 +86,47 @@ The relay-backed operator test is `membrane iac-smoke`.
 
 ## Full stack (operators)
 
-For the live gate, attestation bus, and session IAC path you need:
+The operator and caller have separate signing keys. The gate requires an
+operator-signed, caller-bound IAC, an exact registry identity grant, and a fresh
+caller proof on every production request. The bundled registry deliberately
+denies all callers. Copying its defaults is not a working authorization setup.
 
-1. A local or operator-controlled relay
-2. Your own `NOSTR_NSEC` (never commit)
-3. An IAC **issued and signed by that same key** (`membrane iac issue` / `iac sign`)
+Run the [operator walkthrough](docs/operator-walkthrough.md) from a fresh clone.
+It builds the shipped CLI, generates local test keys, writes an exact grant,
+issues a short-lived IAC, and sends a signed request through the production HTTP
+route. No paid API or GitHub token is needed for the local model check. The
+explicit development mock returns a canned model reply; authorization and relay
+receipts use the production path. Replace the mock with your own model backend
+before deployment.
 
-The gate verifies the IAC against the signer pubkey. Bundled files such as `tools/demo-iac.json` only work when your `NOSTR_NSEC` matches the key that signed them - an arbitrary nsec will fail closed. Prefer issuing a fresh session IAC for your key.
+For GitHub reads and writes, continue with the
+[GitHub connector recipe](docs/github-connector.md). It includes separate caller
+keys, `--caller-pubkey`, `--gate-pubkey`, identity grants, stable write operation
+IDs, and signed curl requests. Do not mount operator tokens in the public demo.
 
-1. **Local relay** (self-hosted bus - do not use public relays for writes):
+Raw curl calls need both `X-Membrane-IAC` and `X-Membrane-Caller-Proof`. The
+walkthrough's Rust example signs the exact typed body using the current
+`/health` audience. Copying an IAC alone is insufficient. See
+[caller identity](docs/caller-identity.md) for the protocol, grant windows and
+revocation limits.
 
-```bash
-docker run --rm -d --name membrane-relay -p 7777:8080 \
-  -v "$PWD/tools/relay-local.toml:/usr/src/app/config.toml:ro" \
-  scsibug/nostr-rs-relay:0.10.0
-```
+### Interactive self-hosted sessions
 
-2. **Build:**
-
-```bash
-cargo build --release
-```
-
-3. **Set signing key** (never commit):
-
-```bash
-export NOSTR_NSEC='nsec1...'   # or: doppler run -- ...
-export MEMBRANE_RELAY_URL='ws://127.0.0.1:7777'
-```
-
-4. **Commands:**
-
-```bash
-cargo run -- bus publish-test          # kind 31990 test event
-cargo run -- bus subscribe             # fetch events + recompute bus_root
-cargo run -- iac-smoke                 # technical fail-closed IAC/relay smoke test
-cargo run -- gate start --iac <your-signed-iac.json>   # HTTP gate on :8787 → model API
-
-# Session-scoped IAC (binds to current cp_chain head, short TTL)
-cargo run -- iac issue --model qwen2.5-0.5b-instruct --ttl-secs 3600 --out session-iac.json
-curl -s http://127.0.0.1:8787/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H "X-Membrane-IAC: $(cat session-iac.json)" \
-  -d '{"model":"qwen2.5-0.5b-instruct","messages":[{"role":"user","content":"hi"}]}'
-
-# Daily rollup (independent timestamping)
-cargo run -- rollup export --day 2026-07-05 --out rollup.json
-cargo run -- rollup sign --input rollup.json --out rollup.signed.json
-cargo run -- rollup stamp --input rollup.signed.json --ots-out rollup.ots
-```
-
-**Model API:** point `model_api_url` in your channel registry at any allowed backend that speaks the chat/completions wire format (default example: `http://127.0.0.1:8080/v1/chat/completions`). If the backend is unreachable the request fails. For local development only, set `MEMBRANE_DEV_MOCK_MODEL=1` to get a canned reply instead.
-
-**Gate HTTP:** `POST /v1/chat/completions` with a standard chat/completions JSON body. Pass a **session-scoped** IAC via `X-Membrane-IAC` header (JSON or base64 JSON). Each turn publishes `membrane.cp.router` with a context Merkle root and chains `parent_cp_hash` to the prior CP. Issue session IACs with `membrane iac issue` (binds `parent_cp_hash` to the current chain head). A static `--iac` file is only valid when signed by the same key the gate is running as.
-
-**Tool invoke (GitHub connector):** `POST /v1/tools/invoke` after `membrane iac issue --tool github.comment`. Requires `MEMBRANE_GITHUB_TOKEN` (or `GITHUB_TOKEN`) and a non-empty `github_repo_allowlist` in the channel registry. Out-of-scope tools (for example `github.merge`) are blocked with a receipt before any GitHub HTTP. Helper: `membrane tools invoke …`. Full recipe: [docs/github-connector.md](docs/github-connector.md). Do not enable this on the public demo sandbox.
-
-### Self-hosted session (local LLM with receipts)
+`membrane chat` is the self-caller case: the caller and gate operator keys are
+the same. It issues an IAC and sends proofs automatically, but its generated
+`chat-<unix-seconds>` scope still needs an exact identity grant in the registry.
+Do not run it against the default deny-all registry or the separate-caller pilot
+grant. The explicit-scope walkthrough is the simplest first run.
 
 ```bash
-# One-time setup
-membrane init    # writes ~/.config/membrane/config.yaml
-export NOSTR_NSEC='nsec1...'
-
-# Interactive chat (auto-issues session IAC, prints CP receipt each turn)
-membrane chat
-
-# One-shot
-membrane chat --message "summarize my threat model"
-
-# Audit your chain
 membrane session status
 membrane session receipts --since-secs 86400
-
-# Export standard SIEM telemetry (no signing key required)
 membrane evidence export --format jsonl --since-secs 86400 --out membrane-siem.jsonl
 membrane evidence export --format ocsf --since-secs 86400 --out membrane-siem.ocsf.json
-
-# Sever active session (fail-closed; requires fresh IAC to resume)
-membrane sever
-membrane sever --scope-id session-1234567890
 ```
 
-Each turn returns `X-Membrane-CP-Hash`, `X-Membrane-Session-Nonce`, and related headers from the gate. Session logs are saved under `~/.local/share/membrane/sessions/`.
+Each authorized turn returns `X-Membrane-CP-Hash` and related receipt headers.
+Interactive session logs are saved under `~/.local/share/membrane/sessions/`.
 
 **SIEM/SOC export:** signed bus events can be projected as vendor-neutral JSON
 Lines or an explicitly OCSF-inspired JSON pack. This lets existing SOC, SIEM,
