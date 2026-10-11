@@ -41,12 +41,16 @@ nothing, the denial is the gate working.
   anything else (wildcards, newlines, spaces, `..`) gets advice and no patch. The
   edited registry is re-parsed and compared: only the intended list may change.
 - **Unsupported shapes are refused.** Inline lists (`[a, b]`) are not rewritten.
-- **Review-by comment.** Added entries carry a `review by <date>` comment
-  (snapshot time plus 7 days). The registry format has no expiry, so this is a
-  reminder, not enforcement. Enforced time-boxing needs an IAC `valid_until`.
-- **Per-identity grants are not available yet.** The IAC does not authenticate a
-  caller-specific agent id (see `operator-dashboard.md`), so the advisor cannot name
-  "identity X". Per-identity and deny-spike recommendations wait on that.
+- **Review-by comment.** Added global allowlist entries carry a `review by
+  <date>` comment (snapshot time plus 7 days). The comment is a reminder, not
+  enforcement. Identity grants support enforced `not_before`, `expires_at` or
+  `valid_for` windows; IACs also have `valid_until`. See [caller
+  identity](caller-identity.md). A global allowlist comment does not set a window.
+- **Per-identity review.** Caller-bound IACs and proof-of-possession authenticate
+  exact caller keys. The advisor groups denials by `authenticated_identity` and
+  can recommend exact-key revocation for review. It does not auto-grant,
+  un-revoke or widen global policy for identity-attributed denials. `grant_window`
+  denials get window/renewal advice; renewal stays an operator decision.
 
 ## Gate change
 
