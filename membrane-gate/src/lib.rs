@@ -454,6 +454,7 @@ pub mod identity;
 pub mod liveness;
 pub mod proxy;
 pub mod readings;
+pub mod routstr;
 pub mod server;
 pub mod siem_export;
 pub mod spend;
