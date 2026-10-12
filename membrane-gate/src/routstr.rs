@@ -122,6 +122,14 @@ impl<R: RoutstrRail> RoutstrAdapter<R> {
 
     /// Upper bound on what this request can cost, or a denial.
     pub fn ceiling_for(&self, body: &Value) -> Result<(String, u64), AdapterError> {
+        self.ceiling_with_limit(body, None)
+    }
+
+    fn ceiling_with_limit(
+        &self,
+        body: &Value,
+        caller_limit: Option<u64>,
+    ) -> Result<(String, u64), AdapterError> {
         let model = body
             .get("model")
             .and_then(Value::as_str)
@@ -146,10 +154,12 @@ impl<R: RoutstrRail> RoutstrAdapter<R> {
             .len() as u64;
         let ceiling = cost_msat(price, input_bound, max_tokens)
             .ok_or_else(|| AdapterError::Denied("cost overflow".into()))?;
-        if ceiling > self.policy.per_call_ceiling_msat {
+        let limit = caller_limit.map_or(self.policy.per_call_ceiling_msat, |l| {
+            l.min(self.policy.per_call_ceiling_msat)
+        });
+        if ceiling > limit {
             return Err(AdapterError::Denied(format!(
-                "ceiling {ceiling} msat exceeds per-call limit {}",
-                self.policy.per_call_ceiling_msat
+                "ceiling {ceiling} msat exceeds per-call limit {limit}"
             )));
         }
         Ok((model.to_string(), ceiling))
@@ -161,7 +171,20 @@ impl<R: RoutstrRail> RoutstrAdapter<R> {
         reservation_id: &str,
         body: Value,
     ) -> Result<Completed, AdapterError> {
-        let (model, ceiling) = self.ceiling_for(&body)?;
+        self.dispatch_with_limit(budget, reservation_id, body, None)
+            .await
+    }
+
+    /// Like `dispatch`, with a tighter per-call limit from the caller's grant. The
+    /// effective limit is the smaller of it and the adapter policy's.
+    pub async fn dispatch_with_limit(
+        &self,
+        budget: &str,
+        reservation_id: &str,
+        body: Value,
+        per_call_limit: Option<u64>,
+    ) -> Result<Completed, AdapterError> {
+        let (model, ceiling) = self.ceiling_with_limit(&body, per_call_limit)?;
         match self.ledger.reserve(budget, reservation_id, ceiling) {
             Ok(Reserved::New) => {}
             Ok(Reserved::Existing) => {
@@ -278,6 +301,64 @@ fn measured_cost(p: &Pricing, reply: &Value) -> Option<u64> {
     let input = usage.get("prompt_tokens")?.as_u64()?;
     let output = usage.get("completion_tokens")?.as_u64()?;
     cost_msat(p, input, output)
+}
+
+#[async_trait]
+impl RoutstrRail for Box<dyn RoutstrRail> {
+    async fn chat(&self, call: &ChatCall) -> Result<ChatReply, RailError> {
+        (**self).chat(call).await
+    }
+    async fn balance_msat(&self) -> Result<u64, RailError> {
+        (**self).balance_msat().await
+    }
+}
+
+/// Ledger plus adapter, as held by the gate server.
+pub struct SpendService {
+    pub ledger: Arc<BudgetLedger>,
+    pub adapter: RoutstrAdapter<Box<dyn RoutstrRail>>,
+}
+
+pub const ENV_SPEND_DIR: &str = "MEMBRANE_SPEND_DIR";
+pub const ENV_ROUTSTR_POLICY: &str = "MEMBRANE_ROUTSTR_POLICY";
+pub const ENV_ROUTSTR_API_KEY: &str = "MEMBRANE_ROUTSTR_API_KEY";
+
+impl SpendService {
+    /// Spending is off unless all three variables are set. A partial setup is an
+    /// error, never a silent half-configuration. The funded key is operator
+    /// supplied and never read from a request.
+    pub fn from_env() -> anyhow::Result<Option<Self>> {
+        let dir = std::env::var_os(ENV_SPEND_DIR);
+        let policy = std::env::var_os(ENV_ROUTSTR_POLICY);
+        let key = std::env::var(ENV_ROUTSTR_API_KEY).ok();
+        let (Some(dir), Some(policy), Some(key)) = (dir, policy, key) else {
+            if dir_or_any_set() {
+                anyhow::bail!(
+                    "spend is partly configured: set {ENV_SPEND_DIR}, {ENV_ROUTSTR_POLICY} and {ENV_ROUTSTR_API_KEY} together"
+                );
+            }
+            return Ok(None);
+        };
+        let policy: RoutstrPolicy = serde_yaml::from_str(&std::fs::read_to_string(&policy)?)?;
+        if policy.per_call_ceiling_msat == 0 || policy.models.is_empty() {
+            anyhow::bail!("routstr policy needs models and a positive per_call_ceiling_msat");
+        }
+        let rail = HttpRoutstr::new(&policy.node, key, Duration::from_secs(120))
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let ledger = Arc::new(BudgetLedger::open(dir).map_err(|e| anyhow::anyhow!("{e}"))?);
+        let adapter = RoutstrAdapter::new(
+            ledger.clone(),
+            Box::new(rail) as Box<dyn RoutstrRail>,
+            policy,
+        );
+        Ok(Some(Self { ledger, adapter }))
+    }
+}
+
+fn dir_or_any_set() -> bool {
+    [ENV_SPEND_DIR, ENV_ROUTSTR_POLICY, ENV_ROUTSTR_API_KEY]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some())
 }
 
 /// HTTP client for a Routstr node. The `sk-` key never leaves this struct.

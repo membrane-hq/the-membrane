@@ -40,6 +40,8 @@ pub struct GateServerState {
     pub github: Arc<GitHubConnector>,
     pub operations: Arc<crate::operations::OperationJournal>,
     pub audit: Arc<crate::audit::AuditLog>,
+    /// Paid Routstr calls. None means the spend route is off and denies everything.
+    pub spend: Option<Arc<crate::routstr::SpendService>>,
 }
 
 pub async fn run_gate_server(state: GateServerState, listen: &str) -> anyhow::Result<()> {
@@ -74,6 +76,7 @@ pub async fn run_gate_server(state: GateServerState, listen: &str) -> anyhow::Re
         .route("/v1/operator/iac", post(operator_iac))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/tools/invoke", post(tools_invoke))
+        .route("/v1/spend/chat", post(spend_chat))
         .with_state(state);
 
     info!(listen = %listen, "membrane gate listening");
@@ -269,6 +272,168 @@ async fn tools_invoke(
                 .await;
             gate_error_response(err)
         }
+    }
+}
+
+/// Body of a paid chat call: the caller's idempotency id plus an ordinary
+/// chat-completions body. Budget, limits and rail come from the operator's grant,
+/// never from this request.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpendChatRequest {
+    pub operation_id: String,
+    #[serde(flatten)]
+    pub chat: serde_json::Map<String, serde_json::Value>,
+}
+
+fn valid_operation_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+}
+
+/// Reservation ids are bound to the authenticated caller and scope, so one
+/// caller can never collide with or replay another's operation id.
+fn spend_reservation_id(identity: &str, scope: &str, operation_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(
+        format!("membrane-spend-v1\0{identity}\0{scope}\0{operation_id}").as_bytes(),
+    ))
+}
+
+async fn spend_chat(
+    State(state): State<GateServerState>,
+    headers: HeaderMap,
+    request: Result<Json<SpendChatRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    use crate::routstr::{AdapterError, UNIT};
+    use crate::spend::SpendError;
+    let req = match request {
+        Ok(Json(req)) => req,
+        Err(rejection) => {
+            record_denied(
+                &state,
+                &GateError::Registry("invalid JSON request".into()),
+                "spend",
+            );
+            return rejection.into_response();
+        }
+    };
+    let mut identity = None;
+    let mut iac_scope = None;
+    let authorization = (|| {
+        let iac = load_iac(&headers, state.default_iac.as_ref())?;
+        let proof = load_caller_proof(&headers)?;
+        identity = Some(state.gate.authenticate_caller(
+            &iac,
+            &proof,
+            "/v1/spend/chat",
+            &req,
+            now_secs(),
+        )?);
+        let model = req
+            .chat
+            .get("model")
+            .and_then(|m| m.as_str())
+            .ok_or_else(|| GateError::Registry("request has no model".into()))?;
+        iac_scope = Some(iac.scope_id.clone());
+        state
+            .gate
+            .authorize_spend(identity.as_deref().unwrap(), &iac, model)
+    })();
+    let grant = match authorization {
+        Ok(grant) => grant,
+        Err(err) => {
+            record_denied_identity(&state, &err, "spend", identity);
+            return gate_error_response(err);
+        }
+    };
+    let (identity, scope) = (identity.unwrap_or_default(), iac_scope.unwrap_or_default());
+    let deny = |state: &GateServerState, why: String| {
+        let err = GateError::Spend(why);
+        record_denied_identity(state, &err, "spend", Some(identity.clone()));
+        gate_error_response(err)
+    };
+    let Some(service) = state.spend.clone() else {
+        return deny(&state, "spend is not configured on this gate".into());
+    };
+    if !valid_operation_id(&req.operation_id) {
+        return deny(
+            &state,
+            "operation_id must be 1-128 of [A-Za-z0-9._:-]".into(),
+        );
+    }
+    if let Err(e) = service
+        .ledger
+        .open_budget(&grant.budget, UNIT, grant.budget_cap_msat)
+    {
+        return deny(&state, format!("budget unavailable: {e}"));
+    }
+    let reservation = spend_reservation_id(&identity, &scope, &req.operation_id);
+    let result = service
+        .adapter
+        .dispatch_with_limit(
+            &grant.budget,
+            &reservation,
+            serde_json::Value::Object(req.chat.clone()),
+            Some(grant.per_call_ceiling_msat),
+        )
+        .await;
+    let dispatched = |state: &GateServerState| {
+        state.audit.record_authenticated(
+            "allow",
+            "spend_dispatched",
+            state.gate.publisher_pubkey_hex(),
+            Some(scope.clone()),
+            "spend.chat",
+            None,
+            Some(identity.clone()),
+        );
+    };
+    match result {
+        Ok(done) => {
+            dispatched(&state);
+            Json(json!({
+                "ok": true, "status": "settled", "operation_id": req.operation_id,
+                "receipt": done.receipt, "response": done.reply,
+            }))
+            .into_response()
+        }
+        Err(AdapterError::Rejected(why)) => {
+            dispatched(&state);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "ok": false, "status": "rejected", "operation_id": req.operation_id,
+                    "message": format!("Rail refused the call and charged nothing: {why}"),
+                })),
+            )
+                .into_response()
+        }
+        Err(AdapterError::Uncertain(why)) => {
+            dispatched(&state);
+            (StatusCode::BAD_GATEWAY, Json(json!({
+                "ok": false, "status": "uncertain", "operation_id": req.operation_id,
+                "error": why, "message": "The call may have been charged. Budget stays held; reconcile before retrying.",
+            }))).into_response()
+        }
+        Err(AdapterError::AlreadyDispatched(_)) => {
+            let err = GateError::Spend("operation_id already used".into());
+            record_denied_identity(&state, &err, "spend", Some(identity.clone()));
+            (StatusCode::CONFLICT, Json(json!({
+                "ok": false, "status": "duplicate", "operation_id": req.operation_id,
+                "message": "This operation_id was already submitted; it will not be dispatched again.",
+            }))).into_response()
+        }
+        Err(AdapterError::Budget(SpendError::Insufficient { .. })) => {
+            let err = GateError::Spend("budget exhausted".into());
+            record_denied_identity(&state, &err, "spend", Some(identity.clone()));
+            (StatusCode::PAYMENT_REQUIRED, Json(json!({
+                "ok": false, "status": "blocked", "message": "Budget cannot cover this call's ceiling.",
+            }))).into_response()
+        }
+        Err(e) => deny(&state, e.to_string()),
     }
 }
 
@@ -808,6 +973,7 @@ fn gate_error_response(err: GateError) -> Response {
         | GateError::ContextBoundExceeded
         | GateError::SessionDegraded(_, _)
         | GateError::SessionStale(_, _)
+        | GateError::Spend(_)
         | GateError::Connector(_) => StatusCode::FORBIDDEN,
         GateError::SiemExport(_) => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::BAD_REQUEST,
@@ -891,6 +1057,11 @@ mod tool_invoke_policy_tests {
                     not_before: None,
                     expires_at: None,
                     valid_for: None,
+                    spend: Some(crate::identity::SpendGrant {
+                        budget: "pilot".into(),
+                        budget_cap_msat: 1_000_000,
+                        per_call_ceiling_msat: 50_000,
+                    }),
                 },
             )]
             .into(),
@@ -932,6 +1103,7 @@ mod tool_invoke_policy_tests {
                 std::env::temp_dir().join(Keys::generate().public_key().to_hex()),
             )),
             audit: Arc::new(crate::audit::AuditLog::default()),
+            spend: None,
         };
         (state, iac)
     }
@@ -947,6 +1119,180 @@ mod tool_invoke_policy_tests {
             pull_number: None,
             body: Some("local test".into()),
             commit_title: None,
+        }
+    }
+
+    mod spend_route {
+        use super::*;
+        use crate::routstr::{
+            ChatCall, ChatReply, Pricing, RailError, RoutstrAdapter, RoutstrPolicy, RoutstrRail,
+            SpendService,
+        };
+        use crate::spend::BudgetLedger;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct Rail {
+            calls: Arc<AtomicUsize>,
+            fail_unknown: bool,
+        }
+        #[async_trait::async_trait]
+        impl RoutstrRail for Rail {
+            async fn chat(&self, _: &ChatCall) -> Result<ChatReply, RailError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.fail_unknown {
+                    return Err(RailError::Unknown("timeout".into()));
+                }
+                Ok(ChatReply {
+                    body: json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20}}),
+                })
+            }
+            async fn balance_msat(&self) -> Result<u64, RailError> {
+                Ok(0)
+            }
+        }
+
+        fn with_spend(fail_unknown: bool) -> (GateServerState, Arc<AtomicUsize>) {
+            let (mut state, _) = test_state(vec![], vec![]);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let dir = std::env::temp_dir().join(format!(
+                "spend-route-{}",
+                Keys::generate().public_key().to_hex()
+            ));
+            let ledger = Arc::new(BudgetLedger::open(dir).unwrap());
+            let policy = RoutstrPolicy {
+                node: "https://node.test/v1".into(),
+                models: [(
+                    "demo".to_string(),
+                    Pricing {
+                        input_msat_per_mtok: 1_000_000,
+                        output_msat_per_mtok: 2_000_000,
+                        request_fee_msat: 10,
+                    },
+                )]
+                .into(),
+                per_call_ceiling_msat: 100_000,
+            };
+            let rail: Box<dyn RoutstrRail> = Box::new(Rail {
+                calls: calls.clone(),
+                fail_unknown,
+            });
+            state.spend = Some(Arc::new(SpendService {
+                ledger: ledger.clone(),
+                adapter: RoutstrAdapter::new(ledger, rail, policy),
+            }));
+            (state, calls)
+        }
+
+        fn request(op: &str, max_tokens: u64) -> SpendChatRequest {
+            let chat = json!({"model":"demo","max_tokens":max_tokens,"messages":[{"role":"user","content":"hi"}]});
+            SpendChatRequest {
+                operation_id: op.into(),
+                chat: chat.as_object().unwrap().clone(),
+            }
+        }
+
+        async fn call(
+            state: &GateServerState,
+            req: &SpendChatRequest,
+        ) -> (StatusCode, serde_json::Value) {
+            let proof = membrane_core::caller::CallerProof::sign(
+                state.gate.publisher().keys(),
+                &state.gate.caller_audience(),
+                "/v1/spend/chat",
+                req,
+                state.default_iac.as_ref().unwrap(),
+                now_secs(),
+                Keys::generate().public_key().to_hex(),
+            )
+            .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-membrane-caller-proof",
+                serde_json::to_string(&proof).unwrap().parse().unwrap(),
+            );
+            let response = spend_chat(State(state.clone()), headers, Ok(Json(req.clone()))).await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(json!(null)),
+            )
+        }
+
+        #[tokio::test]
+        async fn settles_and_replays_once() {
+            let (state, calls) = with_spend(false);
+            let (status, body) = call(&state, &request("op-1", 100)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["status"], "settled");
+            assert_eq!(body["receipt"]["final_cost"], 60);
+            let ledger = &state.spend.as_ref().unwrap().ledger;
+            let v = ledger.budget("pilot").unwrap();
+            assert_eq!((v.spent, v.held, v.cap), (60, 0, 1_000_000));
+            // same operation id again, fresh proof nonce: never dispatched twice
+            let (status, body) = call(&state, &request("op-1", 100)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(ledger.budget("pilot").unwrap().spent, 60);
+        }
+
+        #[tokio::test]
+        async fn denies_without_spend_config_or_over_the_grant_limit() {
+            let (mut state, calls) = with_spend(false);
+            // grant limit is 50_000 msat; max_tokens 30_000 at 2 msat/token = 60_000
+            let (status, _) = call(&state, &request("op-big", 30_000)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            let (status, _) = call(&state, &request("bad id!", 10)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            state.spend = None;
+            let (status, _) = call(&state, &request("op-2", 10)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            let (_, decisions) = state.audit.snapshot().unwrap();
+            assert!(decisions.iter().all(|d| d.outcome == "deny"));
+        }
+
+        #[tokio::test]
+        async fn identity_without_a_spend_grant_is_denied() {
+            let (mut state, calls) = with_spend(false);
+            let gate = Arc::get_mut(&mut state.gate).unwrap();
+            for grant in gate.registry.identities.values_mut() {
+                grant.spend = None;
+            }
+            let (status, _) = call(&state, &request("op-3", 10)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn exhausted_budget_is_payment_required() {
+            let (state, calls) = with_spend(false);
+            let ledger = state.spend.as_ref().unwrap().ledger.clone();
+            ledger.open_budget("pilot", "msat", 1_000_000).unwrap();
+            ledger.reserve("pilot", "someone-else", 999_990).unwrap();
+            let (status, _) = call(&state, &request("op-4", 100)).await;
+            assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+
+        #[tokio::test]
+        async fn timeout_holds_budget_and_is_listed_for_reconciliation() {
+            let (state, calls) = with_spend(true);
+            let (status, body) = call(&state, &request("op-5", 100)).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert_eq!(body["status"], "uncertain");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let report = crate::reconciliation::reconcile(&state).await.unwrap();
+            assert_eq!(report["spend_open"].as_array().unwrap().len(), 1);
+            assert_eq!(report["spend_open"][0]["state"], "uncertain");
+            assert_eq!(report["automatic_retry"], false);
+            // retry of the same operation never re-sends
+            let (status, _) = call(&state, &request("op-5", 100)).await;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
     }
 

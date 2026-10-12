@@ -20,15 +20,26 @@ pub async fn reconcile(state: &GateServerState) -> Result<Value, GateError> {
         })?;
     }
     Ok(
-        json!({"operations":state.operations.unresolved()?, "legacy_reservations":state.operations.legacy_reservations()?, "automatic_retry":false}),
+        json!({"operations":state.operations.unresolved()?, "legacy_reservations":state.operations.legacy_reservations()?, "spend_open":spend_open(state)?, "automatic_retry":false}),
     )
+}
+/// Spend reservations still holding budget. Reported only; never retried or
+/// resolved automatically, because a rail balance cannot attribute one charge.
+fn spend_open(state: &GateServerState) -> Result<Value, GateError> {
+    match &state.spend {
+        None => Ok(json!([])),
+        Some(s) => Ok(json!(s
+            .ledger
+            .open_reservations()
+            .map_err(|e| GateError::Spend(e.to_string()))?)),
+    }
 }
 pub async fn list(
     State(state): State<GateServerState>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let _chain = state.session_chain.lock().await;
     Ok(Json(
-        json!({"operations":state.operations.unresolved().map_err(error)?, "legacy_reservations":state.operations.legacy_reservations().map_err(error)?, "automatic_retry":false}),
+        json!({"operations":state.operations.unresolved().map_err(error)?, "legacy_reservations":state.operations.legacy_reservations().map_err(error)?, "spend_open":spend_open(&state).map_err(error)?, "automatic_retry":false}),
     ))
 }
 pub async fn run(

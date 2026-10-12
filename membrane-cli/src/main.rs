@@ -812,6 +812,7 @@ async fn gate_start(
         operations,
         github: Arc::new(GitHubConnector::new(github_cfg)),
         audit: Arc::new(membrane_gate::audit::AuditLog::default()),
+        spend: membrane_gate::routstr::SpendService::from_env()?.map(Arc::new),
     };
 
     run_gate_server(state, listen).await
