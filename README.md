@@ -29,10 +29,10 @@ The repo also includes a demo of the operator workflow: authorization checks and
 | [docs/github-connector.md](docs/github-connector.md) | GitHub connector configuration |
 | [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site) | Public site repository ([membrane.dojopop.live](https://membrane.dojopop.live)) |
 | [docs/demo.md](docs/demo.md) | Local product dashboard - one-command demo |
-| [docs/whitepaper.md](docs/whitepaper.md) | Full specification (v0.9.14) - architecture & research |
+| [docs/whitepaper.md](docs/whitepaper.md) | Cognitive-boundary research specification (not operator documentation) |
 | [docs/appendix-open-research.md](docs/appendix-open-research.md) | Open-source BCI stacks, security research, Phase 0 path |
 | [docs/the-membrane-complete.md](docs/the-membrane-complete.md) | Single-file edition (whitepaper + Appendix B) |
-| [docs/the-membrane-complete.pdf](docs/the-membrane-complete.pdf) | PDF export with table of contents |
+| [docs/the-membrane-complete.pdf](docs/the-membrane-complete.pdf) | Research PDF with table of contents (not operator documentation) |
 
 Rebuild MD/PDF: `./scripts/build-paper.sh`
 

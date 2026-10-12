@@ -1106,7 +1106,7 @@ Proof generation remains one of the primary practical blockers for frequent atte
 
 ### 11.1 Licensing
 
-Reference implementation: **GPL-3.0** or **AGPL-3.0**. The protocol must remain open and auditable. Patent license: explicit defensive patent pledge for all contributors.
+The source code shipped in this repository is licensed **AGPL-3.0-only**; the documentation and research specification are **CC BY 4.0**. The protocol must remain open and auditable. Patent license: explicit defensive patent pledge for all contributors.
 
 ### 11.2 Audit Plan
 
@@ -1536,7 +1536,7 @@ No citation in this document is presented as stronger than its tier.
 
 Contributors are welcome.
 
-Implement the MVP (§9) using the stacks in [Appendix B](./appendix-open-research.md). Publish benchmarks via GitHub issues. Security disclosures: notify the author privately, 90-day coordinated disclosure. Reference implementation: GPL-3.0/AGPL-3.0.
+Implement the MVP (§9) using the stacks in [Appendix B](./appendix-open-research.md). Publish benchmarks via GitHub issues. Security disclosures: notify the author privately, 90-day coordinated disclosure. The shipped source code is AGPL-3.0-only; the documentation and research specification are CC BY 4.0.
 
 ## Footnotes
 
