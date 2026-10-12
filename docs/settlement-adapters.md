@@ -1,6 +1,6 @@
 # Settlement adapters: spend as policy
 
-Status: design direction. This note proposes a shared spend-policy boundary with Routstr and Crossmint adapters. It does not add payment support or commit an implementation schedule.
+Status: design direction. This note proposes a shared spend-policy boundary with Routstr and Crossmint adapters. It does not add payment support or commit an implementation schedule. Implementation status: the budget ledger (`membrane-gate::spend`) and a Routstr adapter (`membrane-gate::routstr`) exist as library code with mock-rail tests. They are not wired into the gate request path and have not been run against a live Routstr node. The Crossmint adapter is not started.
 
 ## Boundary
 
