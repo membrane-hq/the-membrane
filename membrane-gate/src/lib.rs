@@ -456,6 +456,7 @@ pub mod proxy;
 pub mod readings;
 pub mod server;
 pub mod siem_export;
+pub mod spend;
 pub mod watchdog;
 
 pub use demo::{
