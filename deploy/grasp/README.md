@@ -48,7 +48,7 @@ doppler run --project dojopop --config prd_zorie -- bash -c '
     --grasp-server membrane-grasp.dojopop.live \
     --grasp-server gitworkshop.dev
   git remote rename origin grasp 2>/dev/null || true
-  git remote add github https://github.com/Z0rlord/the-membrane.git 2>/dev/null || true
+  git remote add github https://github.com/membrane-hq/the-membrane.git 2>/dev/null || true
 '
 ```
 

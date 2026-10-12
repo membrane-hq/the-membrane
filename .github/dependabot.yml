@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Cargo.lock is at the workspace root, not in an individual crate directory.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
