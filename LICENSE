@@ -15,4 +15,4 @@ Full license: https://creativecommons.org/licenses/by/4.0/legalcode
 
 ---
 
-Future reference implementation code in this repository, when added, will be licensed separately under GNU Affero General Public License v3.0 unless otherwise noted in that directory.
+This license applies to the documentation and research specification. Source code in this repository is licensed under GNU Affero General Public License v3.0 only (AGPL-3.0-only); see LICENSE-AGPL-3.0 and the Cargo manifests. This scope statement does not change either license.

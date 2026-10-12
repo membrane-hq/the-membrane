@@ -4,7 +4,7 @@ The Membrane is a fail-closed authorization gateway for AI agents with productio
 
 The Membrane began with the concept of a firewall between human cognition and AI silicon, developed in the [cognitive boundary research](docs/whitepaper.md); the agent gate applies that boundary to model and tool calls.
 
-**Public landing:** [membrane.dojopop.live](https://membrane.dojopop.live) · source in [`site/`](site/)
+**Public landing:** [membrane.dojopop.live](https://membrane.dojopop.live) · source in [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site)
 
 ## Run it under your own control
 
@@ -27,12 +27,12 @@ The repo also includes a demo of the operator workflow: authorization checks and
 | [docs/product.md](docs/product.md) | Product overview and deployment |
 | [docs/siem-export.md](docs/siem-export.md) | Vendor-neutral SIEM/SOC export (JSON Lines and OCSF-inspired JSON) |
 | [docs/github-connector.md](docs/github-connector.md) | GitHub connector configuration |
-| [site/](site/) | Public landing page ([membrane.dojopop.live](https://membrane.dojopop.live)) |
+| [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site) | Public site repository ([membrane.dojopop.live](https://membrane.dojopop.live)) |
 | [docs/demo.md](docs/demo.md) | Local product dashboard - one-command demo |
-| [docs/whitepaper.md](docs/whitepaper.md) | Full specification (v0.9.14) - architecture & research |
+| [docs/whitepaper.md](docs/whitepaper.md) | Cognitive-boundary research specification (not operator documentation) |
 | [docs/appendix-open-research.md](docs/appendix-open-research.md) | Open-source BCI stacks, security research, Phase 0 path |
 | [docs/the-membrane-complete.md](docs/the-membrane-complete.md) | Single-file edition (whitepaper + Appendix B) |
-| [docs/the-membrane-complete.pdf](docs/the-membrane-complete.pdf) | PDF export with table of contents |
+| [docs/the-membrane-complete.pdf](docs/the-membrane-complete.pdf) | Research PDF with table of contents (not operator documentation) |
 
 Rebuild MD/PDF: `./scripts/build-paper.sh`
 
@@ -73,7 +73,7 @@ First build takes about a minute. Check your setup with `cargo test --workspace`
 
 ## Local demo dashboard
 
-No secrets, relay, or paid APIs needed. Open the public sandbox at [membrane-demo.dojopop.live](https://membrane-demo.dojopop.live), or run the same demo locally. Preview the landing site with `python3 -m http.server 8080 --directory site`.
+No secrets, relay, or paid APIs needed. Open the public sandbox at [membrane-demo.dojopop.live](https://membrane-demo.dojopop.live), or run the same demo locally. The landing and dashboard sources live in [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site); run its static preview from that repository.
 
 ```bash
 cargo run -p membrane-cli -- demo

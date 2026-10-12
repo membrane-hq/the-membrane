@@ -1,9 +1,43 @@
-.DS_Store
-*.swp
-.env
-.venv/
-__pycache__/
+# Rust build output. Cargo.lock is tracked for reproducible workspace builds.
 /target/
+**/target/
 **/*.rs.bk
-tools/relay-data/
+
+# Local secrets and environment overrides. Keep example templates tracked.
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.nsec
+*.pem.local
+
+# Gate journals, receipt exports and generated pilot key material.
+/.membrane/
+/pilot/
+/pilot-*/
+/keys.json
+/session-iac.json
+/membrane-siem*.jsonl
+/membrane-siem*.json
+/rollup*.json
+/rollup*.ots
+/tools/relay-data/
+
+# Local Python / site tooling state.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
 .wrangler/
+node_modules/
+
+# OS and editor files.
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
