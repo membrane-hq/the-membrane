@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
             token: None,
         })),
         audit,
+        spend: None,
     };
     let task = bind(state, "127.0.0.1:8788").await?;
     println!("Synthetic audit preview on 127.0.0.1:8788; not a running production gate");

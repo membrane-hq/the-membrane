@@ -30,6 +30,20 @@ pub struct IdentityGrant {
     /// a registry file means the same thing whenever it is read.
     #[serde(default)]
     pub valid_for: Option<String>,
+    /// Spend authority on the Routstr rail. Absent means this identity cannot spend.
+    #[serde(default)]
+    pub spend: Option<SpendGrant>,
+}
+
+/// Operator-granted spend scope: which shared budget this identity draws on and the
+/// most one call may cost. Budgets are not resized in place: two grants naming the
+/// same budget must state the same cap, or spending is denied until they agree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpendGrant {
+    pub budget: String,
+    pub budget_cap_msat: u64,
+    pub per_call_ceiling_msat: u64,
 }
 
 /// Parse `valid_for` into seconds. Zero, unknown units and overflow are errors.
@@ -178,6 +192,34 @@ impl Gate {
             .map_err(|_| GateError::GrantWindow("system clock unavailable".into()))?;
         self.authorize_identity_at(identity, iac, model, tool_repo, now)
     }
+    /// Everything `authorize_identity` checks, plus a spend grant. Returns it so the
+    /// caller never trusts a budget or limit supplied by the request.
+    pub fn authorize_spend(
+        &self,
+        identity: &str,
+        iac: &IntentAuthorizationCredential,
+        model: &str,
+    ) -> Result<SpendGrant, GateError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .map_err(|_| GateError::GrantWindow("system clock unavailable".into()))?;
+        self.authorize_identity_at(identity, iac, model, None, now)?;
+        let live;
+        let registry = if let Some(path) = &self.identity_registry_path {
+            live = ChannelRegistry::load(path)
+                .map_err(|e| GateError::IdentityGrant(format!("registry unavailable: {e}")))?;
+            &live
+        } else {
+            &self.registry
+        };
+        registry
+            .identities
+            .get(identity)
+            .and_then(|g| g.spend.clone())
+            .filter(|s| s.per_call_ceiling_msat > 0 && s.per_call_ceiling_msat <= s.budget_cap_msat)
+            .ok_or_else(|| GateError::Spend("no valid spend grant for identity".into()))
+    }
     pub fn authorize_identity_at(
         &self,
         identity: &str,
@@ -261,6 +303,7 @@ mod tests {
             not_before: None,
             expires_at: None,
             valid_for: None,
+            spend: None,
         };
         let registry = ChannelRegistry {
             identities: [(caller.public_key().to_hex(), grant)].into(),

@@ -156,6 +156,7 @@ pub fn rule(err: &GateError) -> &'static str {
         GateError::SessionDegraded(_, _) => "session_degraded",
         GateError::SessionStale(_, _) => "session_stale",
         GateError::Connector(_) => "connector_unavailable",
+        GateError::Spend(_) => "spend_policy",
         GateError::Registry(_) => "request_or_registry_invalid",
         GateError::SiemExport(_) => "audit_export_unavailable",
         GateError::Bus(_) => "receipt_or_upstream_unavailable",

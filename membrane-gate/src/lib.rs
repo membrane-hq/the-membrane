@@ -45,6 +45,8 @@ pub enum GateError {
     Connector(String),
     #[error("registry error: {0}")]
     Registry(String),
+    #[error("spend denied: {0}")]
+    Spend(String),
     #[error("SIEM export: {0}")]
     SiemExport(String),
     #[error("bus error: {0}")]

@@ -1,6 +1,6 @@
 # Settlement adapters: spend as policy
 
-Status: design direction. This note proposes a shared spend-policy boundary with Routstr and Crossmint adapters. It does not add payment support or commit an implementation schedule. Implementation status: the budget ledger (`membrane-gate::spend`) and a Routstr adapter (`membrane-gate::routstr`) exist as library code with mock-rail tests. They are not wired into the gate request path and have not been run against a live Routstr node. The Crossmint adapter is not started.
+Status: design direction. This note proposes a shared spend-policy boundary with Routstr and Crossmint adapters. It does not add payment support or commit an implementation schedule. Implementation status: the budget ledger (`membrane-gate::spend`), a Routstr adapter (`membrane-gate::routstr`) and an opt-in gate route (`POST /v1/spend/chat`) exist with mock-rail tests. They have not been run against a live Routstr node, and funding and refund calls are not built. The Crossmint adapter is not started.
 
 ## Boundary
 
@@ -23,6 +23,10 @@ Both adapters would implement the same gate-side intent and evidence contract. T
 4. Record the rail's settlement result and final cost, then release any unused reservation. If dispatch may have spent funds but confirmation is missing, retain the reservation and reconcile before retrying. A timeout is not proof that nothing was paid.
 
 Proposed receipt fields include the scope and request identifiers, rail, asset and unit, payee, reserved ceiling, final cost and fees, settlement reference, and outcome. Do not include bearer tokens, Cashu proofs, or signing keys. A Membrane authorization receipt and a provider's settlement record prove different things; link them without treating either as a substitute for the other.
+
+## Operator setup (routstr, opt-in)
+
+The route is off unless `MEMBRANE_SPEND_DIR`, `MEMBRANE_ROUTSTR_POLICY` and `MEMBRANE_ROUTSTR_API_KEY` are all set; a partial setup stops startup. The policy file (YAML) names the node, per-model prices in msat per million tokens, and a per-call ceiling. The funded `sk-` key is supplied by the operator and never read from a request. An identity may spend only with a `spend` grant in the identity registry (`budget`, `budget_cap_msat`, `per_call_ceiling_msat`), on top of the usual scope, channel and model checks. The request carries an `operation_id` and a chat body with `max_tokens`; budget, limits and rail come only from the grant. Reservation ids are bound to the authenticated caller and scope. Reservations that may have been charged stay held and appear as `spend_open` in the loopback operations report; they are never retried or resolved automatically.
 
 ## Limits and open checks
 
