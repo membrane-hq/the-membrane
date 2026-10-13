@@ -8,6 +8,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let registry = ChannelRegistry {
+        approval: None,
         identities: Default::default(),
         permitted_channels: vec!["local-llm".into()],
         forbidden_exports: vec!["cloud-telemetry".into(), "training-retention".into()],
@@ -91,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         })),
         audit,
         spend: None,
+        approvals: None,
     };
     let task = bind(state, "127.0.0.1:8788").await?;
     println!("Synthetic audit preview on 127.0.0.1:8788; not a running production gate");
