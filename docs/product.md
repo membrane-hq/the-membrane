@@ -59,7 +59,7 @@ A fail-closed gateway that requires a live, signed authorization for every model
 5. **Reconstruct.** Open the timeline, click any action, and see the model, context scope, policy, and issuer behind it-no log spelunking.
 6. **Export evidence.** One click produces a signed evidence pack; verify the hash chain offline in seconds.
 
-Local walkthrough: [demo.md](demo.md) (`cargo run -p membrane-cli -- demo`). For external tool execution, configure the production gate with a supported connector ([github-connector.md](github-connector.md)).
+Local walkthrough: [demo.md](demo.md) (`cargo run -p membrane-cli --features demo -- demo`). For external tool execution, configure the production gate with a supported connector ([github-connector.md](github-connector.md)).
 
 ---
 
