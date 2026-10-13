@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        image: [gate, demo]
+        image: [gate, demo, rollup]
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f deploy/${{ matrix.image }}/Dockerfile -t membrane-${{ matrix.image }} .
