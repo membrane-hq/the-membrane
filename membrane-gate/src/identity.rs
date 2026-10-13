@@ -228,6 +228,30 @@ impl Gate {
         tool_repo: Option<(&str, &str)>,
         now: i64,
     ) -> Result<(), GateError> {
+        self.authorize_identity_inner(identity, iac, model, tool_repo, now, false)
+    }
+    /// For a call an operator approved: every check `authorize_identity` makes except that
+    /// the tool need not be in the caller's grant or IAC. Scope, channels, model, repo and
+    /// the grant window still apply, so an approval never widens anything else.
+    pub fn authorize_identity_approved(
+        &self,
+        identity: &str,
+        iac: &IntentAuthorizationCredential,
+        model: &str,
+        tool_repo: (&str, &str),
+        now: i64,
+    ) -> Result<(), GateError> {
+        self.authorize_identity_inner(identity, iac, model, Some(tool_repo), now, true)
+    }
+    fn authorize_identity_inner(
+        &self,
+        identity: &str,
+        iac: &IntentAuthorizationCredential,
+        model: &str,
+        tool_repo: Option<(&str, &str)>,
+        now: i64,
+        tool_pre_approved: bool,
+    ) -> Result<(), GateError> {
         let live;
         let registry = if let Some(path) = &self.identity_registry_path {
             live = ChannelRegistry::load(path)
@@ -261,7 +285,9 @@ impl Gate {
             return Err(GateError::ModelDenied(model.into()));
         }
         if let Some((tool, repo)) = tool_repo {
-            if !iac.tool_allowed(tool) || !grant.tool_allowlist.iter().any(|t| t == tool) {
+            if !tool_pre_approved
+                && (!iac.tool_allowed(tool) || !grant.tool_allowlist.iter().any(|t| t == tool))
+            {
                 return Err(GateError::ToolDenied(tool.into()));
             }
             if !registry.github_repo_allowlist.iter().any(|r| r == repo)
@@ -306,6 +332,7 @@ mod tests {
             spend: None,
         };
         let registry = ChannelRegistry {
+            approval: None,
             identities: [(caller.public_key().to_hex(), grant)].into(),
             permitted_channels: vec!["local-llm".into()],
             forbidden_exports: vec![],

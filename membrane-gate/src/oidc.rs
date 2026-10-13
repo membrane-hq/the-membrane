@@ -43,6 +43,8 @@ pub struct OperatorOidc {
 #[derive(Debug)]
 pub struct OperatorIdentity {
     pub operator: String,
+    /// The value of the configured identity claim (for example the OIDC `sub`).
+    pub subject: String,
     pub expires_at: i64,
 }
 impl OperatorOidc {
@@ -144,6 +146,7 @@ impl OperatorOidc {
             .clone();
         Ok(OperatorIdentity {
             operator,
+            subject: claim.to_string(),
             expires_at: expiry,
         })
     }
@@ -288,6 +291,20 @@ impl Gate {
     pub fn with_operator_oidc(mut self, config: OidcConfig) -> Result<Self, GateError> {
         self.operator_oidc = Some(OperatorOidc::new(config, &self.iac_signer_pubkey)?);
         Ok(self)
+    }
+    /// Authenticate a human operator for an approval decision. Returns the OIDC subject
+    /// only when it maps to this gate's trusted operator key.
+    pub async fn authenticate_operator(&self, token: &str) -> Result<OperatorIdentity, GateError> {
+        let identity = self
+            .operator_oidc
+            .as_ref()
+            .ok_or_else(|| denied("not configured"))?
+            .validate(token)
+            .await?;
+        if identity.operator != self.iac_signer_pubkey {
+            return Err(denied("operator no longer trusted"));
+        }
+        Ok(identity)
     }
     pub async fn issue_operator_iac(
         &self,
@@ -623,6 +640,7 @@ mod tests {
             ..Default::default()
         };
         let registry = crate::ChannelRegistry {
+            approval: None,
             identities: [(caller.clone(), grant)].into(),
             permitted_channels: vec!["local-llm".into()],
             forbidden_exports: vec!["training".into()],

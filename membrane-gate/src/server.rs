@@ -42,6 +42,8 @@ pub struct GateServerState {
     pub audit: Arc<crate::audit::AuditLog>,
     /// Paid Routstr calls. None means the spend route is off and denies everything.
     pub spend: Option<Arc<crate::routstr::SpendService>>,
+    /// Approval gates. None means out-of-scope tool calls are blocked, never held.
+    pub approvals: Option<Arc<crate::approval::ApprovalStore>>,
 }
 
 pub async fn run_gate_server(state: GateServerState, listen: &str) -> anyhow::Result<()> {
@@ -77,6 +79,8 @@ pub async fn run_gate_server(state: GateServerState, listen: &str) -> anyhow::Re
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/tools/invoke", post(tools_invoke))
         .route("/v1/spend/chat", post(spend_chat))
+        .route("/v1/approvals", get(approvals_list))
+        .route("/v1/approvals/{id}/decision", post(approvals_decide))
         .with_state(state);
 
     info!(listen = %listen, "membrane gate listening");
@@ -250,15 +254,30 @@ async fn tools_invoke(
         )
     })();
     if let Err(err) = authorization {
+        if let Some(caller) = identity.as_deref() {
+            if let Some(response) = hold_or_resume(&state, &headers, &req, caller, &err).await {
+                return response;
+            }
+        }
         record_denied_identity(&state, &err, "tool", identity);
         return gate_error_response(err);
     }
+    dispatch_tool_invoke(&state, &headers, &req, identity, None).await
+}
+
+async fn dispatch_tool_invoke(
+    state: &GateServerState,
+    headers: &HeaderMap,
+    req: &ToolInvokeRequest,
+    identity: Option<String>,
+    approval: Option<&crate::approval::Approval>,
+) -> Response {
     let mut authorized = false;
-    match handle_tool_invoke(&state, &headers, &req, &mut authorized).await {
+    match handle_tool_invoke_with(state, headers, req, &mut authorized, approval).await {
         Ok((body, receipt)) => tool_success_response(body, &receipt),
         Err(err) => {
             if !authorized {
-                record_denied_identity(&state, &err, "tool", identity.clone());
+                record_denied_identity(state, &err, "tool", identity.clone());
             }
             if authorized {
                 // Dispatch has begun. Do not describe an upstream or journal
@@ -268,10 +287,287 @@ async fn tools_invoke(
                     "error": err.to_string(), "message": "Reconcile upstream before retrying this operation."
                 }))).into_response();
             }
-            publish_blocked_receipt(&state, &headers, Some(&req.model), Some(&req.tool), &err)
-                .await;
+            publish_blocked_receipt(state, headers, Some(&req.model), Some(&req.tool), &err).await;
             gate_error_response(err)
         }
+    }
+}
+
+/// An authenticated caller's call was refused because the tool is not in its grant. If the
+/// operator marked the tool holdable, hold the call for a human decision, or run it once if
+/// an operator already approved this exact call. Returns None when approval gates do not apply.
+async fn hold_or_resume(
+    state: &GateServerState,
+    headers: &HeaderMap,
+    req: &ToolInvokeRequest,
+    caller: &str,
+    err: &GateError,
+) -> Option<Response> {
+    use crate::approval::Resolution;
+    let store = state.approvals.as_ref()?;
+    let policy = state.gate.registry().approval.as_ref()?;
+    if !matches!(err, GateError::ToolDenied(t) if *t == req.tool) || !policy.holds(&req.tool) {
+        return None;
+    }
+    let iac = load_iac(headers, state.default_iac.as_ref()).ok()?;
+    let now = now_secs();
+    let target = format!("{}/{}", req.owner, req.repo);
+    let fail = |state: &GateServerState, e: GateError| {
+        record_denied_identity(state, &e, "tool", Some(caller.to_string()));
+        Some(gate_error_response(e))
+    };
+    let hash = match crate::approval::call_hash(caller, &iac.scope_id, req) {
+        Ok(h) => h,
+        Err(e) => return fail(state, e),
+    };
+    match store.resolve(&hash, now) {
+        Err(e) => fail(state, e),
+        Ok(Resolution::Approved(approval)) => {
+            // One-shot grant: everything except the tool is checked again now.
+            if let Err(e) = state.gate.authorize_identity_approved(
+                caller,
+                &iac,
+                &req.model,
+                (&req.tool, &target),
+                now,
+            ) {
+                return fail(state, e);
+            }
+            record_approval_event(state, "approval.consumed", &approval, Some(caller));
+            Some(
+                dispatch_tool_invoke(
+                    state,
+                    headers,
+                    req,
+                    Some(caller.to_string()),
+                    Some(&approval),
+                )
+                .await,
+            )
+        }
+        Ok(Resolution::Pending(approval)) => Some(held_response(&approval, now)),
+        Ok(Resolution::None) => {
+            // Check everything except the tool before asking a human about it.
+            if let Err(e) = state.gate.authorize_identity_approved(
+                caller,
+                &iac,
+                &req.model,
+                (&req.tool, &target),
+                now,
+            ) {
+                return fail(state, e);
+            }
+            let request = serde_json::to_value(req).unwrap_or_default();
+            let (approval, fresh) = match store.open_hold(
+                &hash,
+                caller,
+                &iac.scope_id,
+                &req.tool,
+                &target,
+                request,
+                now,
+                policy.ttl_secs,
+            ) {
+                Ok(v) => v,
+                Err(e) => return fail(state, e),
+            };
+            if fresh {
+                record_approval_event(state, "approval.held", &approval, Some(caller));
+                let reason = format!(
+                    "held for approval {}: {} on {}",
+                    approval.id, req.tool, target
+                );
+                publish_blocked_receipt(
+                    state,
+                    headers,
+                    Some(&req.model),
+                    Some(&req.tool),
+                    &GateError::ToolDenied(reason),
+                )
+                .await;
+            }
+            Some(held_response(&approval, now))
+        }
+    }
+}
+
+fn held_response(approval: &crate::approval::Approval, now: i64) -> Response {
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "ok": false,
+            "status": "held",
+            "approval_id": approval.id,
+            "expires_at": approval.expires_at,
+            "message": "This call is held for operator approval. Nothing was dispatched. Retry the identical request after approval; the approval covers one call.",
+            "approval": approval.view(now),
+        })),
+    )
+        .into_response()
+}
+
+fn record_approval_event(
+    state: &GateServerState,
+    action: &str,
+    approval: &crate::approval::Approval,
+    identity: Option<&str>,
+) {
+    state.audit.record_authenticated(
+        "hold_or_approval",
+        action,
+        state.gate.publisher_pubkey_hex(),
+        Some(approval.scope_id.clone()),
+        action,
+        Some(approval.id.clone()),
+        identity.map(str::to_string),
+    );
+}
+
+fn operator_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+}
+
+/// Operator view of holds. Requires an operator bearer token.
+async fn approvals_list(State(state): State<GateServerState>, headers: HeaderMap) -> Response {
+    let Some(store) = state.approvals.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "message": "approval gates are not enabled"})),
+        )
+            .into_response();
+    };
+    let Some(token) = operator_token(&headers) else {
+        let err = GateError::IdentityAuthentication("operator bearer token required".into());
+        record_denied(&state, &err, "approval.list");
+        return gate_error_response(err);
+    };
+    if let Err(err) = state.gate.authenticate_operator(token).await {
+        record_denied(&state, &err, "approval.list");
+        return gate_error_response(err);
+    }
+    let now = now_secs();
+    match store.list() {
+        Ok(items) => Json(json!({
+            "approvals": items.iter().map(|a| a.view(now)).collect::<Vec<_>>()
+        }))
+        .into_response(),
+        Err(err) => gate_error_response(err),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApprovalDecisionRequest {
+    decision: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// An operator approves or rejects one held call. The decision is recorded as a signed
+/// receipt before it takes effect.
+async fn approvals_decide(
+    State(state): State<GateServerState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<ApprovalDecisionRequest>,
+) -> Response {
+    let Some(store) = state.approvals.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"ok": false, "message": "approval gates are not enabled"})),
+        )
+            .into_response();
+    };
+    let Some(token) = operator_token(&headers) else {
+        let err = GateError::IdentityAuthentication("operator bearer token required".into());
+        record_denied(&state, &err, "approval.decide");
+        return gate_error_response(err);
+    };
+    let operator = match state.gate.authenticate_operator(token).await {
+        Ok(op) => op,
+        Err(err) => {
+            record_denied(&state, &err, "approval.decide");
+            return gate_error_response(err);
+        }
+    };
+    let approve = match body.decision.as_str() {
+        "approve" => true,
+        "reject" => false,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"ok": false, "message": "decision must be approve or reject"})),
+            )
+                .into_response();
+        }
+    };
+    if body.note.as_ref().is_some_and(|n| n.len() > 1024) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "message": "note too long"})),
+        )
+            .into_response();
+    }
+    let now = now_secs();
+    let pending = match store.get(&id) {
+        Ok(Some(a)) if a.state == crate::approval::ApprovalState::Pending && !a.is_expired(now) => {
+            a
+        }
+        Ok(_) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"ok": false, "message": "approval is unknown, decided or expired"})),
+            )
+                .into_response();
+        }
+        Err(err) => return gate_error_response(err),
+    };
+    // Publish the decision receipt first; a failed publication leaves the hold pending.
+    let (last_cp_hash, prev_event_id) = {
+        let chain = state.session_chain.lock().await;
+        (chain.last_cp_hash.clone(), chain.last_event_id.clone())
+    };
+    let receipt = json!({
+        "approval_id": pending.id,
+        "decision": body.decision,
+        "decided_by": operator.subject,
+        "scope_id": pending.scope_id,
+        "identity": pending.identity,
+        "tool_id": pending.tool,
+        "target": pending.target,
+        "call_hash": pending.call_hash,
+        "note": body.note,
+    });
+    let event_id = match state
+        .gate
+        .publish_approval_decision(receipt, now, &last_cp_hash, prev_event_id.as_deref())
+        .await
+    {
+        Ok(id) => id,
+        Err(err) => {
+            record_denied(&state, &err, "approval.decide");
+            return gate_error_response(err);
+        }
+    };
+    match store.decide(&id, approve, &operator.subject, body.note.clone(), now) {
+        Ok(updated) => {
+            record_approval_event(
+                &state,
+                if approve {
+                    "approval.approved"
+                } else {
+                    "approval.rejected"
+                },
+                &updated,
+                Some(&operator.subject),
+            );
+            Json(json!({"ok": true, "bus_event_id": event_id, "approval": updated.view(now)}))
+                .into_response()
+        }
+        Err(err) => gate_error_response(err),
     }
 }
 
@@ -615,11 +911,24 @@ async fn handle_chat(
 }
 
 /// Production tool path: IAC + allowlist + liveness first; GitHub only after allow.
+#[cfg(test)]
 async fn handle_tool_invoke(
     state: &GateServerState,
     headers: &HeaderMap,
     req: &ToolInvokeRequest,
     authorized: &mut bool,
+) -> Result<(serde_json::Value, SessionReceipt), GateError> {
+    handle_tool_invoke_with(state, headers, req, authorized, None).await
+}
+
+/// `approval` is an operator-approved, already-consumed hold for exactly this call. It
+/// waives only the tool-allowlist check, and its evidence is hashed into the receipt.
+async fn handle_tool_invoke_with(
+    state: &GateServerState,
+    headers: &HeaderMap,
+    req: &ToolInvokeRequest,
+    authorized: &mut bool,
+    approval: Option<&crate::approval::Approval>,
 ) -> Result<(serde_json::Value, SessionReceipt), GateError> {
     let iac = load_iac(headers, state.default_iac.as_ref())?;
     let now = now_secs();
@@ -633,7 +942,11 @@ async fn handle_tool_invoke(
     }
 
     // Hard block out-of-scope tools before any upstream connector call.
-    state.gate.authorize_tool(&iac, &req.tool, now)?;
+    if approval.is_some() {
+        state.gate.validate_iac(Some(&iac), now)?;
+    } else {
+        state.gate.authorize_tool(&iac, &req.tool, now)?;
+    }
 
     if !is_github_tool(&req.tool) {
         return Err(GateError::Connector(format!(
@@ -655,8 +968,20 @@ async fn handle_tool_invoke(
         .checked_add(1)
         .ok_or_else(|| GateError::Connector("scope nonce exhausted".into()))?;
     let prev_event_id = chain.last_event_id.clone();
-    let context_chunks =
+    let mut context_chunks =
         vec![serde_json::to_vec(req).map_err(|e| GateError::Registry(e.to_string()))?];
+    if let Some(a) = approval {
+        // The approval is part of what the receipt attests.
+        context_chunks.push(
+            serde_json::to_vec(&json!({
+                "approval_id": a.id,
+                "call_hash": a.call_hash,
+                "decided_by": a.decided_by,
+                "decided_at": a.decided_at,
+            }))
+            .map_err(|e| GateError::Registry(e.to_string()))?,
+        );
+    }
 
     let reservation = if req.tool == crate::github::TOOL_GITHUB_ISSUE_READ {
         None
@@ -727,14 +1052,24 @@ async fn handle_tool_invoke(
     state
         .gate
         .check_session_liveness(&chain, &iac.scope_id, now_secs())?;
-    state.gate.authorize_identity(
-        iac.caller_pubkey
-            .as_deref()
-            .ok_or_else(|| GateError::IdentityAuthentication("missing caller binding".into()))?,
-        &iac,
-        &req.model,
-        Some((&req.tool, &format!("{}/{}", req.owner, req.repo))),
-    )?;
+    let caller = iac
+        .caller_pubkey
+        .as_deref()
+        .ok_or_else(|| GateError::IdentityAuthentication("missing caller binding".into()))?;
+    let target = format!("{}/{}", req.owner, req.repo);
+    if approval.is_some() {
+        state.gate.authorize_identity_approved(
+            caller,
+            &iac,
+            &req.model,
+            (&req.tool, &target),
+            now_secs(),
+        )?;
+    } else {
+        state
+            .gate
+            .authorize_identity(caller, &iac, &req.model, Some((&req.tool, &target)))?;
+    }
     *authorized = true;
     record_allowed(state, &iac, "tool");
     let execution = state.github.execute(req).await;
@@ -1045,6 +1380,7 @@ mod tool_invoke_policy_tests {
     ) -> (GateServerState, IntentAuthorizationCredential) {
         let keys = Keys::generate();
         let registry = ChannelRegistry {
+            approval: None,
             identities: [(
                 keys.public_key().to_hex(),
                 crate::identity::IdentityGrant {
@@ -1104,6 +1440,7 @@ mod tool_invoke_policy_tests {
             )),
             audit: Arc::new(crate::audit::AuditLog::default()),
             spend: None,
+            approvals: None,
         };
         (state, iac)
     }
@@ -1119,6 +1456,218 @@ mod tool_invoke_policy_tests {
             pull_number: None,
             body: Some("local test".into()),
             commit_title: None,
+        }
+    }
+
+    mod approval_gates {
+        use super::*;
+        use crate::approval::{ApprovalPolicy, ApprovalStore};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// A gate whose grant covers no tools, with `github.comment` holdable.
+        async fn gated(
+            holdable: Vec<String>,
+        ) -> (
+            GateServerState,
+            Arc<AtomicUsize>,
+            tokio::task::JoinHandle<()>,
+        ) {
+            let (mut state, _) = test_state(vec![], vec!["acme/pilot".into()]);
+            // The IAC lists no tools either, so the tool is out of scope for this caller.
+            let mut registry = state.gate.registry().clone();
+            registry.approval = Some(ApprovalPolicy {
+                holdable_tools: holdable,
+                ttl_secs: 600,
+            });
+            state.gate = Arc::new(Gate::new(
+                registry,
+                BusPublisher::new(BusPublisherConfig {
+                    relay_url: "memory://tool-policy".into(),
+                    keys: state.gate.publisher().keys().clone(),
+                }),
+            ));
+            state.approvals = Some(Arc::new(ApprovalStore::in_memory()));
+            let hits = Arc::new(AtomicUsize::new(0));
+            let count = hits.clone();
+            let app = axum::Router::new().route(
+                "/repos/acme/pilot/issues/1/comments",
+                post(move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"id":42,"html_url":"http://localhost/comment/42"}))
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            state.github = Arc::new(GitHubConnector::new(GitHubConnectorConfig {
+                api_base: format!("http://{address}"),
+                repo_allowlist: vec!["acme/pilot".into()],
+                token: Some("fake".into()),
+            }));
+            (state, hits, server)
+        }
+
+        async fn send(
+            state: &GateServerState,
+            req: &ToolInvokeRequest,
+        ) -> (StatusCode, serde_json::Value) {
+            let mut headers = HeaderMap::new();
+            let proof = membrane_core::caller::CallerProof::sign(
+                state.gate.publisher().keys(),
+                &state.gate.caller_audience(),
+                "/v1/tools/invoke",
+                req,
+                state.default_iac.as_ref().unwrap(),
+                now_secs(),
+                Keys::generate().public_key().to_hex(),
+            )
+            .unwrap();
+            headers.insert(
+                "x-membrane-caller-proof",
+                serde_json::to_string(&proof).unwrap().parse().unwrap(),
+            );
+            let response = tools_invoke(State(state.clone()), headers, Ok(Json(req.clone()))).await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(json!(null)),
+            )
+        }
+
+        fn only_pending(state: &GateServerState) -> crate::approval::Approval {
+            let items = state.approvals.as_ref().unwrap().list().unwrap();
+            assert_eq!(items.len(), 1);
+            items[0].clone()
+        }
+
+        #[tokio::test]
+        async fn out_of_scope_call_is_held_then_runs_once_after_approval() {
+            let (state, hits, server) = gated(vec![TOOL_GITHUB_COMMENT.into()]).await;
+            let req = comment_request();
+            let (status, body) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(body["status"], "held");
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            // Retrying while pending does not open a second hold or dispatch.
+            let (status, _) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let hold = only_pending(&state);
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&hold.id, true, "oncall", None, now_secs())
+                .unwrap();
+            let (status, body) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+            // The approval was one call. The next identical call is held again.
+            let mut again = req.clone();
+            again.operation_id = Some("test-operation".into());
+            let (status, body) = send(&state, &again).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+            server.abort();
+        }
+
+        #[tokio::test]
+        async fn approval_covers_only_the_exact_call() {
+            let (state, hits, server) = gated(vec![TOOL_GITHUB_COMMENT.into()]).await;
+            let req = comment_request();
+            send(&state, &req).await;
+            let hold = only_pending(&state);
+            state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&hold.id, true, "oncall", None, now_secs())
+                .unwrap();
+            let mut other = req.clone();
+            other.body = Some("different text".into());
+            other.operation_id = Some("other-operation".into());
+            let (status, _) = send(&state, &other).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            server.abort();
+        }
+
+        #[tokio::test]
+        async fn rejected_call_never_runs() {
+            let (state, hits, server) = gated(vec![TOOL_GITHUB_COMMENT.into()]).await;
+            let req = comment_request();
+            send(&state, &req).await;
+            let hold = only_pending(&state);
+            state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&hold.id, false, "oncall", Some("no".into()), now_secs())
+                .unwrap();
+            let (status, _) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            server.abort();
+        }
+
+        #[tokio::test]
+        async fn tool_not_marked_holdable_is_still_blocked() {
+            let (state, hits, server) = gated(vec!["github.merge".into()]).await;
+            let (status, _) = send(&state, &comment_request()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(state.approvals.as_ref().unwrap().list().unwrap().is_empty());
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            server.abort();
+        }
+
+        #[tokio::test]
+        async fn approval_does_not_waive_repo_allowlist() {
+            let (state, hits, server) = gated(vec![TOOL_GITHUB_COMMENT.into()]).await;
+            let mut req = comment_request();
+            req.repo = "other".into();
+            let (status, _) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(state.approvals.as_ref().unwrap().list().unwrap().is_empty());
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            server.abort();
+        }
+
+        #[tokio::test]
+        async fn without_gates_enabled_out_of_scope_stays_blocked() {
+            let (state, _) = test_state(vec![], vec!["acme/pilot".into()]);
+            let (status, _) = send(&state, &comment_request()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+
+        #[tokio::test]
+        async fn decision_requires_operator_token() {
+            let (state, _hits, server) = gated(vec![TOOL_GITHUB_COMMENT.into()]).await;
+            send(&state, &comment_request()).await;
+            let hold = only_pending(&state);
+            let response = approvals_decide(
+                State(state.clone()),
+                axum::extract::Path(hold.id.clone()),
+                HeaderMap::new(),
+                Json(ApprovalDecisionRequest {
+                    decision: "approve".into(),
+                    note: None,
+                }),
+            )
+            .await;
+            assert_ne!(response.status(), StatusCode::OK);
+            assert_eq!(
+                only_pending(&state).state,
+                crate::approval::ApprovalState::Pending
+            );
+            server.abort();
         }
     }
 
