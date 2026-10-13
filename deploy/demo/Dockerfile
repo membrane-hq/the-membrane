@@ -6,7 +6,7 @@ COPY membrane-gate membrane-gate
 COPY membrane-cli membrane-cli
 COPY membrane-dashboard membrane-dashboard
 COPY membrane-advisor membrane-advisor
-RUN cargo build --locked --release -p membrane-cli
+RUN cargo build --locked --release -p membrane-cli --no-default-features --features demo
 
 FROM debian:bookworm-slim
 RUN apt-get update -qq \
