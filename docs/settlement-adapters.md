@@ -1,6 +1,6 @@
 # Settlement adapters: spend as policy
 
-Status: design direction. This note proposes a shared spend-policy boundary with Routstr and Crossmint adapters. It does not add payment support or commit an implementation schedule. Implementation status: the budget ledger (`membrane-gate::spend`), a Routstr adapter (`membrane-gate::routstr`) and an opt-in gate route (`POST /v1/spend/chat`) exist with mock-rail tests. They have not been run against a live Routstr node, and funding and refund calls are not built. The Crossmint adapter is not started.
+Status: design direction. This note proposes a shared spend-policy boundary with Routstr and Crossmint adapters. It does not add payment support or commit an implementation schedule. Implementation status: the budget ledger (`membrane-gate::spend`), a Routstr adapter (`membrane-gate::routstr`) and an opt-in gate route (`POST /v1/spend/chat`) exist with mock-rail tests. They have not been run against a live Routstr node, and funding and refund calls are not built. A Crossmint adapter (`membrane-gate::crossmint`) exists with mock-rail tests and an HTTP client tested against a local stand-in server. It has not been run against Crossmint, no approval signer ships, and it is not wired to a gate route.
 
 ## Boundary
 
@@ -27,6 +27,14 @@ Proposed receipt fields include the scope and request identifiers, rail, asset a
 ## Operator setup (routstr, opt-in)
 
 The route is off unless `MEMBRANE_SPEND_DIR`, `MEMBRANE_ROUTSTR_POLICY` and `MEMBRANE_ROUTSTR_API_KEY` are all set; a partial setup stops startup. The policy file (YAML) names the node, per-model prices in msat per million tokens, and a per-call ceiling. The funded `sk-` key is supplied by the operator and never read from a request. An identity may spend only with a `spend` grant in the identity registry (`budget`, `budget_cap_msat`, `per_call_ceiling_msat`), on top of the usual scope, channel and model checks. The request carries an `operation_id` and a chat body with `max_tokens`; budget, limits and rail come only from the grant. Reservation ids are bound to the authenticated caller and scope. Reservations that may have been charged stay held and appear as `spend_open` in the loopback operations report; they are never retried or resolved automatically.
+
+## Crossmint adapter: what exists and what does not
+
+Exists, mock-tested: `membrane-gate::crossmint`, using the same ledger discipline as Routstr. A payment intent is checked against an operator policy (allowlisted payee addresses, per-call ceiling in micro-USDC, chain and token), the amount is reserved in the shared budget, then one transfer is dispatched with the reservation id as the `x-idempotency-key`. A transfer that reaches `success` is finalized; a 4xx refusal or `failed` status releases the reservation; a timeout, 5xx, `pending` or `awaiting-approval` transfer stays held as uncertain for operator reconciliation. Receipts carry the Crossmint transaction id as the settlement reference and no keys or signatures. The API key is read from `MEMBRANE_CROSSMINT_API_KEY`, the policy from the YAML file named by `MEMBRANE_CROSSMINT_POLICY`; neither is read from a request, and a partial setup is an error. The policy sets `api_base` explicitly (there is no default environment).
+
+What the adapter assumes, from Crossmint's wallet REST docs (2025-06-09 API version): a transfer is `POST /wallets/{wallet}/tokens/{chain}:{token}/transfers` with `recipient`, a decimal `amount` and a `signer` locator, returning a transaction with status `awaiting-approval`, `pending`, `success` or `failed`; an approval is `POST /wallets/{wallet}/transactions/{id}/approvals`; Crossmint covers gas. Transfers are final and not reversible once confirmed, so there is no refund path.
+
+Does not exist: any live run, a signer implementation (the approval message must be signed by a key the operator controls; without a signer a transfer stays unapproved and held), a gate route for Crossmint spend, funding flows, and balance reconciliation. The x402 and MPP per-call flows are not implemented: Crossmint documents them through its TypeScript SDK and the x402 client libraries, which sign payments client-side. Whether the wallet's onchain agent-signer caps (spend limit, counterparties, time window) are configurable over REST was not verified; the gate's own budget and payee allowlist are the enforced limits here.
 
 ## Limits and open checks
 
