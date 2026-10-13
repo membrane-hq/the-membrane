@@ -476,6 +476,7 @@ pub fn context_root_hex(chunks: &[Vec<u8>]) -> Result<String, GateError> {
 pub mod alarm;
 pub mod approval;
 pub mod audit;
+pub mod crossmint;
 #[cfg(feature = "demo")]
 pub mod demo;
 pub mod github;
