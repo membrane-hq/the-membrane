@@ -328,6 +328,7 @@ impl IntentAuthorizationCredential {
     }
 }
 
+#[cfg(feature = "ots")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RollupBundle {
     pub version: String,
@@ -339,6 +340,7 @@ pub struct RollupBundle {
     pub last_cp_hash: String,
 }
 
+#[cfg(feature = "ots")]
 impl RollupBundle {
     pub const SCHEMA_VERSION: &str = "0.9.14";
 }
