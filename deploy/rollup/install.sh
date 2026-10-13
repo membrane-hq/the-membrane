@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Install Membrane daily rollup timer on relay-2.
 #
-# Prerequisite: /opt/membrane/bin/membrane (from deploy/gate/deploy.sh)
+# Prerequisite: Docker on the target host; builds a separate ots-enabled binary.
 # Usage: ./install.sh [ssh-host]
 set -euo pipefail
 
 HOST="${1:-relay-2}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REMOTE_DIR="/opt/membrane/rollup"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 echo "==> Installing rollup timer on ${HOST}"
 
@@ -17,6 +18,26 @@ rsync -az \
   "$SCRIPT_DIR/membrane-rollup.service" \
   "$SCRIPT_DIR/membrane-rollup.timer" \
   "$HOST:$REMOTE_DIR/"
+
+# Build OTS separately. Gate deploys never enable it or overwrite this binary.
+rsync -az \
+  "$REPO_ROOT/Cargo.toml" "$REPO_ROOT/Cargo.lock" \
+  "$REPO_ROOT/membrane-core" "$REPO_ROOT/membrane-gate" \
+  "$REPO_ROOT/membrane-cli" "$REPO_ROOT/membrane-dashboard" \
+  "$REPO_ROOT/membrane-advisor" \
+  "$HOST:$REMOTE_DIR/build-context/"
+ssh -o BatchMode=yes "$HOST" "mkdir -p '$REMOTE_DIR/build-context/deploy/rollup'"
+rsync -az "$SCRIPT_DIR/Dockerfile" "$HOST:$REMOTE_DIR/build-context/deploy/rollup/"
+ssh -o BatchMode=yes "$HOST" bash -s <<'BUILD'
+set -euo pipefail
+cd /opt/membrane/rollup/build-context
+docker build -f deploy/rollup/Dockerfile -t membrane-rollup:local .
+cid=$(docker create membrane-rollup:local)
+trap 'docker rm "$cid" >/dev/null' EXIT
+docker cp "$cid:/usr/local/bin/membrane" /opt/membrane/rollup/membrane
+chmod 755 /opt/membrane/rollup/membrane
+/opt/membrane/rollup/membrane rollup --help >/dev/null
+BUILD
 
 if [[ -f "$SCRIPT_DIR/../gate/.env" ]]; then
   scp -q "$SCRIPT_DIR/../gate/.env" "$HOST:$REMOTE_DIR/.env"

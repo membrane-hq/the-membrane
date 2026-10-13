@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/opt/membrane/rollup/.env
-ExecStart=/opt/membrane/bin/membrane rollup daily --work-dir /var/lib/membrane/rollup
+ExecStart=/opt/membrane/rollup/membrane rollup daily --work-dir /var/lib/membrane/rollup
 User=root
 Group=root
 

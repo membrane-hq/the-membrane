@@ -24,14 +24,14 @@ GitHub mutations belong on the production gate with a configured connector
 ## Run locally with one command
 
 ```bash
-cargo run -p membrane-cli -- demo
+cargo run -p membrane-cli --features demo -- demo
 ```
 
 Open **http://127.0.0.1:8790/**.
 
-Optional listen address: `cargo run -p membrane-cli -- demo --listen 127.0.0.1:8790`
+Optional listen address: `cargo run -p membrane-cli --features demo -- demo --listen 127.0.0.1:8790`
 
-If the `membrane` binary is installed, the equivalent command is `membrane demo`.
+If the `membrane` binary was built with `--features demo`, the equivalent command is `membrane demo`.
 
 ## What it is
 
@@ -69,7 +69,7 @@ The older relay-backed IAC smoke test remains available to operators as `membran
 
 ```bash
 cargo test -p membrane-cli cli_tests
-cargo test -p membrane-gate demo
+cargo test -p membrane-gate --features demo demo
 cargo test -p membrane-gate github
 cargo test -p membrane-gate tool_invoke_policy
 cargo test -p membrane-core

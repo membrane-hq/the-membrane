@@ -15,12 +15,16 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: cargo test --workspace --all-features --locked
+      - run: cargo check -p membrane-cli --no-default-features --features ots --locked
+      - run: cargo check -p membrane-cli --no-default-features --features demo --locked
   containers:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        image: [gate, demo]
+        image: [gate, demo, rollup]
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f deploy/${{ matrix.image }}/Dockerfile -t membrane-${{ matrix.image }} .

@@ -5,18 +5,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context, Result};
 use chrono::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(feature = "demo")]
+use membrane_core::SessionChainState;
 use membrane_core::{
-    build_ocsf_inspired_pack, build_rollup_bundle, day_bounds_utc, fetch_membrane_bus_events,
-    fetch_membrane_events, fetch_session_chain_bootstrap, keys_from_nsec, membrane_kind_for,
-    npub_from_keys, render_jsonl, subscribe_and_compute_bus_root, validate_rollup_bundle,
-    BusPublisher, BusPublisherConfig, EventType, HttpOtsStamper, IntentAuthorizationCredential,
-    MembraneEvent, MembranePayload, MockOtsStamper, OtsStamper, RollupBundle, SessionChainState,
-    SiemEvent, SiemWebhookShipper, SignedRollupBundle, ENV_WEBHOOK_URL,
+    build_ocsf_inspired_pack, fetch_membrane_bus_events, fetch_membrane_events,
+    fetch_session_chain_bootstrap, keys_from_nsec, membrane_kind_for, npub_from_keys, render_jsonl,
+    subscribe_and_compute_bus_root, BusPublisher, BusPublisherConfig, EventType,
+    IntentAuthorizationCredential, MembraneEvent, MembranePayload, SiemEvent, SiemWebhookShipper,
+    ENV_WEBHOOK_URL,
 };
+#[cfg(feature = "ots")]
+use membrane_core::{
+    build_rollup_bundle, day_bounds_utc, validate_rollup_bundle, HttpOtsStamper, MockOtsStamper,
+    OtsStamper, RollupBundle, SignedRollupBundle,
+};
+#[cfg(feature = "demo")]
+use membrane_gate::{demo_registry, run_demo_dashboard, DemoRuntime, DemoServerState};
 use membrane_gate::{
-    demo_registry, run_demo_dashboard, run_gate_server, ChannelRegistry, DemoRuntime,
-    DemoServerState, Gate, GateServerState, GitHubConnector, GitHubConnectorConfig, LlmProxy,
-    RouterSessionRequest, ENV_TOKEN_FALLBACK, ENV_TOKEN_PRIMARY,
+    run_gate_server, ChannelRegistry, Gate, GateServerState, GitHubConnector,
+    GitHubConnectorConfig, LlmProxy, RouterSessionRequest, ENV_TOKEN_FALLBACK, ENV_TOKEN_PRIMARY,
 };
 
 mod chat;
@@ -48,6 +55,7 @@ enum Commands {
         command: GateCommands,
     },
     /// Daily rollup export, sign, and OTS stamp
+    #[cfg(feature = "ots")]
     Rollup {
         #[command(subcommand)]
         command: RollupCommands,
@@ -97,6 +105,7 @@ enum Commands {
     /// Write default config to ~/.config/membrane/config.yaml
     Init,
     /// Launch the local interactive dashboard (no secrets or relay required)
+    #[cfg(feature = "demo")]
     Demo {
         #[arg(long, default_value = "127.0.0.1:8790")]
         listen: String,
@@ -163,6 +172,7 @@ enum GateCommands {
     },
 }
 
+#[cfg(feature = "ots")]
 #[derive(Subcommand)]
 enum RollupCommands {
     /// Export RollupBundle for a UTC day from the attestation bus
@@ -418,6 +428,7 @@ async fn main() -> Result<()> {
                 listen,
             } => gate_start(&relay, nsec, &registry, &iac, &listen).await,
         },
+        #[cfg(feature = "ots")]
         Commands::Rollup { command } => match command {
             RollupCommands::Export {
                 relay,
@@ -540,6 +551,7 @@ async fn main() -> Result<()> {
                 .await
             }
         },
+        #[cfg(feature = "demo")]
         Commands::Demo { listen } => run_local_demo(&listen).await,
         Commands::IacSmoke {
             relay,
@@ -879,6 +891,7 @@ async fn evidence_export(
     Ok(())
 }
 
+#[cfg(feature = "ots")]
 async fn rollup_export(relay: &str, nsec: Option<String>, day: &str, out: &PathBuf) -> Result<()> {
     let keys = load_keys(nsec)?;
     let (period_start, period_end) = day_bounds_utc(day)?;
@@ -901,6 +914,7 @@ async fn rollup_export(relay: &str, nsec: Option<String>, day: &str, out: &PathB
     Ok(())
 }
 
+#[cfg(feature = "ots")]
 fn rollup_sign(nsec: Option<String>, input: &PathBuf, out: &PathBuf) -> Result<()> {
     let keys = load_keys(nsec)?;
     let bundle: RollupBundle =
@@ -914,6 +928,7 @@ fn rollup_sign(nsec: Option<String>, input: &PathBuf, out: &PathBuf) -> Result<(
     Ok(())
 }
 
+#[cfg(feature = "ots")]
 async fn rollup_stamp(
     relay: &str,
     nsec: Option<String>,
@@ -1288,6 +1303,7 @@ fn iac_verify(input: &PathBuf, pubkey: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "ots")]
 async fn rollup_daily(
     relay: &str,
     nsec: Option<String>,
@@ -1315,6 +1331,7 @@ async fn rollup_daily(
     Ok(())
 }
 
+#[cfg(feature = "demo")]
 async fn run_local_demo(listen: &str) -> Result<()> {
     // Ephemeral local keys — never requires NOSTR_NSEC or production secrets.
     let keys = nostr::Keys::generate();
@@ -1460,6 +1477,7 @@ fn now_secs() -> i64 {
 mod cli_tests {
     use super::*;
 
+    #[cfg(feature = "demo")]
     #[test]
     fn demo_is_the_local_dashboard() {
         let cli = Cli::try_parse_from(["membrane", "demo"]).unwrap();
@@ -1467,6 +1485,18 @@ mod cli_tests {
             cli.command,
             Commands::Demo { listen } if listen == "127.0.0.1:8790"
         ));
+    }
+
+    #[cfg(not(feature = "demo"))]
+    #[test]
+    fn demo_is_absent_without_feature() {
+        assert!(Cli::try_parse_from(["membrane", "demo"]).is_err());
+    }
+
+    #[test]
+    fn rollup_command_matches_feature() {
+        let result = Cli::try_parse_from(["membrane", "rollup", "daily", "--mock"]);
+        assert_eq!(result.is_ok(), cfg!(feature = "ots"));
     }
 
     #[test]

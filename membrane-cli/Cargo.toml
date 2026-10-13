@@ -11,6 +11,11 @@ authors.workspace = true
 name = "membrane"
 path = "src/main.rs"
 
+[features]
+default = []
+ots = ["membrane-core/ots"]
+demo = ["membrane-gate/demo"]
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true

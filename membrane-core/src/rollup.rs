@@ -3,13 +3,21 @@
 pub const GENESIS_CP_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
+#[cfg(feature = "ots")]
 use crate::canonical::canonical_json_bytes;
 use crate::event::{EventType, MembraneEvent};
+#[cfg(feature = "ots")]
 use crate::iac::RollupBundle;
+#[cfg(feature = "ots")]
 use crate::merkle::{prefixed_hash, Domain, MerkleTree};
-use anyhow::{bail, Context, Result};
+#[cfg(feature = "ots")]
+use anyhow::bail;
+use anyhow::{Context, Result};
+#[cfg(feature = "ots")]
 use nostr::secp256k1::Message;
+#[cfg(feature = "ots")]
 use nostr::Keys;
+#[cfg(feature = "ots")]
 use sha2::{Digest, Sha256};
 
 /// Chain-proof event types included in `cp_chain_root`.
@@ -44,6 +52,7 @@ pub fn last_cp_hash_from_events(events: &[MembraneEvent], subject_pubkey: &str) 
     last
 }
 
+#[cfg(feature = "ots")]
 pub fn cp_chain_root_from_events(events: &[MembraneEvent]) -> Result<Option<String>> {
     let mut leaves = Vec::new();
     for event in events {
@@ -56,6 +65,7 @@ pub fn cp_chain_root_from_events(events: &[MembraneEvent]) -> Result<Option<Stri
     Ok(MerkleTree::from_prefixed_leaves(leaves).root_hex())
 }
 
+#[cfg(feature = "ots")]
 pub fn filter_events_in_period(
     events: &[MembraneEvent],
     period_start: i64,
@@ -68,6 +78,7 @@ pub fn filter_events_in_period(
         .collect()
 }
 
+#[cfg(feature = "ots")]
 pub fn build_rollup_bundle(
     events: &[MembraneEvent],
     subject_pubkey: &str,
@@ -101,6 +112,7 @@ pub fn build_rollup_bundle(
     })
 }
 
+#[cfg(feature = "ots")]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SignedRollupBundle {
     #[serde(flatten)]
@@ -108,6 +120,7 @@ pub struct SignedRollupBundle {
     pub signature: String,
 }
 
+#[cfg(feature = "ots")]
 impl SignedRollupBundle {
     pub fn sign(bundle: RollupBundle, keys: &Keys) -> Result<Self> {
         let bytes = canonical_json_bytes(&bundle).context("canonical rollup bytes")?;
@@ -134,6 +147,7 @@ impl SignedRollupBundle {
     }
 }
 
+#[cfg(feature = "ots")]
 pub fn day_bounds_utc(day: &str) -> Result<(i64, i64)> {
     use chrono::{NaiveDate, TimeZone, Utc};
     let date = NaiveDate::parse_from_str(day, "%Y-%m-%d")
@@ -147,6 +161,7 @@ pub fn day_bounds_utc(day: &str) -> Result<(i64, i64)> {
     Ok((start, end))
 }
 
+#[cfg(feature = "ots")]
 pub fn validate_rollup_bundle(bundle: &RollupBundle) -> Result<()> {
     for field in [
         &bundle.cp_chain_root,
@@ -188,6 +203,16 @@ mod tests {
     }
 
     #[test]
+    fn chain_hash_and_bootstrap_are_available_without_ots() {
+        let event = router_event(100, 1);
+        let hash = cp_hash_hex(&event).unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(is_cp_event(event.event_type));
+        assert_eq!(last_cp_hash_from_events(&[event], &"aa".repeat(32)), hash);
+    }
+
+    #[cfg(feature = "ots")]
+    #[test]
     fn cp_chain_root_is_stable() {
         let events = vec![router_event(100, 1), router_event(101, 2)];
         let root_a = cp_chain_root_from_events(&events).unwrap();
@@ -196,6 +221,7 @@ mod tests {
         assert!(root_a.unwrap().len() == 64);
     }
 
+    #[cfg(feature = "ots")]
     #[test]
     fn signed_rollup_ots_digest_is_deterministic() {
         let bundle = RollupBundle {
