@@ -179,7 +179,7 @@ pub fn validate_rollup_bundle(bundle: &RollupBundle) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, feature = "ots"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::{MembranePayload, RouterSessionPayload};
@@ -203,6 +203,16 @@ mod tests {
     }
 
     #[test]
+    fn chain_hash_and_bootstrap_are_available_without_ots() {
+        let event = router_event(100, 1);
+        let hash = cp_hash_hex(&event).unwrap();
+        assert_eq!(hash.len(), 64);
+        assert!(is_cp_event(event.event_type));
+        assert_eq!(last_cp_hash_from_events(&[event], &"aa".repeat(32)), hash);
+    }
+
+    #[cfg(feature = "ots")]
+    #[test]
     fn cp_chain_root_is_stable() {
         let events = vec![router_event(100, 1), router_event(101, 2)];
         let root_a = cp_chain_root_from_events(&events).unwrap();
@@ -211,6 +221,7 @@ mod tests {
         assert!(root_a.unwrap().len() == 64);
     }
 
+    #[cfg(feature = "ots")]
     #[test]
     fn signed_rollup_ots_digest_is_deterministic() {
         let bundle = RollupBundle {
