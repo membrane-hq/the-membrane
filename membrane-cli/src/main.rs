@@ -804,6 +804,22 @@ async fn gate_start(
     }
 
     let proxy = Arc::new(LlmProxy::new(registry.model_api_url.clone()).with_dev_mock_from_env());
+    let approvals = match &registry.approval {
+        Some(policy) => {
+            policy.validate().map_err(anyhow::Error::msg)?;
+            let path = std::env::var("MEMBRANE_APPROVAL_STORE").context(
+                "approval gates are configured: set MEMBRANE_APPROVAL_STORE to a durable file path",
+            )?;
+            println!(
+                "gate: approval gates holdable_tools={:?} ttl={}s store={path}",
+                policy.holdable_tools, policy.ttl_secs
+            );
+            Some(Arc::new(membrane_gate::approval::ApprovalStore::open(
+                path,
+            )?))
+        }
+        None => None,
+    };
     let state = GateServerState {
         gate,
         proxy,
@@ -813,6 +829,7 @@ async fn gate_start(
         github: Arc::new(GitHubConnector::new(github_cfg)),
         audit: Arc::new(membrane_gate::audit::AuditLog::default()),
         spend: membrane_gate::routstr::SpendService::from_env()?.map(Arc::new),
+        approvals,
     };
 
     run_gate_server(state, listen).await
