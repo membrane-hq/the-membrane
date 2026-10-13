@@ -25,6 +25,7 @@ The repo also includes a demo of the operator workflow: authorization checks and
 | File | Description |
 |------|-------------|
 | [docs/product.md](docs/product.md) | Product overview and deployment |
+| [docs/reference-stack.md](docs/reference-stack.md) | Self-hosted deployment with local models, including air-gapped operation |
 | [docs/siem-export.md](docs/siem-export.md) | Vendor-neutral SIEM/SOC export (JSON Lines and OCSF-inspired JSON) |
 | [docs/github-connector.md](docs/github-connector.md) | GitHub connector configuration |
 | [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site) | Public site repository ([membrane.dojopop.live](https://membrane.dojopop.live)) |
