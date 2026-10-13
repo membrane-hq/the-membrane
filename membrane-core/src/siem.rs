@@ -86,6 +86,12 @@ impl SiemEvent {
                 "high",
                 event.digest().ok().map(hex::encode),
             ),
+            _ if event.event_type == EventType::ApprovalDecision => (
+                "approval_decision",
+                "decided",
+                "informational",
+                event.digest().ok().map(hex::encode),
+            ),
             _ if event.event_type == EventType::AlertDegraded
                 && reason.as_deref() == Some("subject_sever") =>
             {
