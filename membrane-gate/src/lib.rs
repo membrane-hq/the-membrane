@@ -68,6 +68,9 @@ pub struct ChannelRegistry {
     /// Explicit `owner/name` repos the GitHub connector may touch. Empty = deny all.
     #[serde(default)]
     pub github_repo_allowlist: Vec<String>,
+    /// Approval gates. Absent means out-of-scope tool calls are blocked, never held.
+    #[serde(default)]
+    pub approval: Option<approval::ApprovalPolicy>,
 }
 
 fn default_delta_t_secs() -> u64 {
@@ -351,6 +354,28 @@ impl Gate {
         Ok((event, bus_event))
     }
 
+    /// Publish the operator's decision on a held call as a signed bus event, so the
+    /// hold, the decision and the execution all sit in the receipt chain.
+    pub async fn publish_approval_decision(
+        &self,
+        decision: serde_json::Value,
+        now: i64,
+        last_cp_hash: &str,
+        prev_event_id: Option<&str>,
+    ) -> Result<String, GateError> {
+        let payload = MembranePayload::Generic(decision);
+        let mut event =
+            MembraneEvent::new(EventType::ApprovalDecision, "", last_cp_hash, now, payload);
+        let id = self
+            .publisher
+            .publish(&mut event, prev_event_id)
+            .await
+            .map_err(GateError::Bus)?
+            .to_hex();
+        self.enqueue_siem(&event, Some(&id));
+        Ok(id)
+    }
+
     pub async fn open_router_session(
         &self,
         iac: Option<&IntentAuthorizationCredential>,
@@ -449,6 +474,7 @@ pub fn context_root_hex(chunks: &[Vec<u8>]) -> Result<String, GateError> {
 }
 
 pub mod alarm;
+pub mod approval;
 pub mod audit;
 pub mod demo;
 pub mod github;
@@ -487,6 +513,7 @@ mod tests {
     fn test_gate(delta_t: u64) -> Gate {
         let keys = Keys::generate();
         let registry = ChannelRegistry {
+            approval: None,
             identities: Default::default(),
             permitted_channels: vec!["local-llm".into()],
             forbidden_exports: vec!["cloud-telemetry".into(), "training-retention".into()],
@@ -549,6 +576,7 @@ mod tests {
     fn rejects_unknown_tool() {
         let keys = Keys::generate();
         let registry = ChannelRegistry {
+            approval: None,
             identities: Default::default(),
             permitted_channels: vec!["local-llm".into()],
             forbidden_exports: vec!["cloud-telemetry".into(), "training-retention".into()],
