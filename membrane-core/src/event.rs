@@ -21,6 +21,8 @@ pub enum EventType {
     AlertDegraded,
     #[serde(rename = "membrane.action.blocked")]
     ActionBlocked,
+    #[serde(rename = "membrane.approval.decision")]
+    ApprovalDecision,
 }
 
 impl EventType {
@@ -33,6 +35,7 @@ impl EventType {
             Self::AnchorOts => "membrane.anchor.ots",
             Self::AlertDegraded => "membrane.alert.degraded",
             Self::ActionBlocked => "membrane.action.blocked",
+            Self::ApprovalDecision => "membrane.approval.decision",
         }
     }
 
@@ -45,6 +48,7 @@ impl EventType {
             Self::AnchorOts => "the-membrane-anchor-ots",
             Self::AlertDegraded => "the-membrane-alert-degraded",
             Self::ActionBlocked => "the-membrane-action-blocked",
+            Self::ApprovalDecision => "the-membrane-approval-decision",
         }
     }
 }
