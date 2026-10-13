@@ -476,6 +476,7 @@ pub fn context_root_hex(chunks: &[Vec<u8>]) -> Result<String, GateError> {
 pub mod alarm;
 pub mod approval;
 pub mod audit;
+#[cfg(feature = "demo")]
 pub mod demo;
 pub mod github;
 pub mod identity;
@@ -488,6 +489,7 @@ pub mod siem_export;
 pub mod spend;
 pub mod watchdog;
 
+#[cfg(feature = "demo")]
 pub use demo::{
     demo_registry, run_demo_dashboard, verify_evidence_pack, verify_evidence_pack_pinned,
     DemoRuntime, DemoServerState, EvidencePack, DEMO_ALLOWED_TOOLS, DEMO_BLOCKED_TOOL, DEMO_MODEL,
