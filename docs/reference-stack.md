@@ -66,6 +66,7 @@ Nothing in the gate's request path requires an external service.
 
 - Run the relay and the gate on internal hosts and point `MEMBRANE_RELAY_URL` at the internal relay.
 - Mirror model weights and container images through an internal registry. Verify hashes after transfer.
+- Build with `cargo build --locked --release -p membrane-cli --no-default-features`; this excludes the `demo` and `ots` features, so the `demo` and `rollup` subcommands do not exist in this build.
 - Do not enable the optional OpenTimestamps rollup; it uses external calendar servers. Use the hash-chained receipt spool and internal time sources for audit time.
 - Export receipts to an internal SIEM collector. Use `fail_closed` mode if loss of the collector should stop agent traffic.
 - Move operator-signed IACs and updates across the boundary by your approved transfer process.
