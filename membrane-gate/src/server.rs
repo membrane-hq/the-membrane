@@ -2431,4 +2431,4 @@ mod tool_invoke_policy_tests {
         assert_eq!(state.session_chain.lock().await.last_cp_hash, before);
         assert_eq!(state.operations.unresolved().unwrap()[0].state, "uncertain");
     }
-            }
+}
