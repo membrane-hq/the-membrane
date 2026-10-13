@@ -198,6 +198,7 @@ impl Default for DemoRuntime {
 
 pub fn demo_registry() -> crate::ChannelRegistry {
     crate::ChannelRegistry {
+        approval: None,
         identities: Default::default(),
         permitted_channels: vec!["local-llm".into()],
         forbidden_exports: vec!["cloud-telemetry".into(), "training-retention".into()],
