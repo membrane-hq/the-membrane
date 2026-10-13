@@ -78,7 +78,7 @@ First build takes about a minute. Check your setup with `cargo test --workspace`
 No secrets, relay, or paid APIs needed. Open the public sandbox at [membrane-demo.dojopop.live](https://membrane-demo.dojopop.live), or run the same demo locally. The landing and dashboard sources live in [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site); run its static preview from that repository.
 
 ```bash
-cargo run -p membrane-cli -- demo
+cargo run -p membrane-cli --features demo -- demo
 # open http://127.0.0.1:8790/
 ```
 
