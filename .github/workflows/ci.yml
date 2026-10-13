@@ -9,7 +9,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -26,5 +26,5 @@ jobs:
       matrix:
         image: [gate, demo, rollup]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -f deploy/${{ matrix.image }}/Dockerfile -t membrane-${{ matrix.image }} .
