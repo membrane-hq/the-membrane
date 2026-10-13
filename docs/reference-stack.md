@@ -84,4 +84,4 @@ Steps are in the [operator walkthrough](operator-walkthrough.md).
 
 - The intent journal is single-instance; see [durable-journal.md](durable-journal.md).
 - No live Okta or Entra exercise has been run for operator sign-in.
-- Approval gates are not built; see [roadmap.md](roadmap.md).
+- Approval gates, where a held action executes only after a human approves it, are not built.
