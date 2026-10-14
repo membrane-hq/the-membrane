@@ -1217,7 +1217,7 @@ pub fn verify_evidence_pack_pinned(
                 }
                 if bus.pubkey.to_hex() != signer
                     || bus.kind.as_u16() != membrane_core::membrane_kind_for(event.event_type)
-                    || bus.created_at.as_u64() as i64 != event.timestamp
+                    || bus.created_at.as_secs() as i64 != event.timestamp
                 {
                     errors.push(format!(
                         "{id}: bus event signer, kind or timestamp mismatch"
