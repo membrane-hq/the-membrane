@@ -211,8 +211,8 @@ The workspace includes the gate, caller-bound IACs and identity grants, CP recei
 
 ## License
 
-- Documentation: [CC BY 4.0](LICENSE)
-- Code: AGPL-3.0
+- Code: [AGPL-3.0-only](LICENSE)
+- Documentation and research documents: [CC BY 4.0](LICENSE-CC-BY-4.0)
 
 ## Author
 
