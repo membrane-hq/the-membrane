@@ -1,0 +1,23 @@
+name: OSS Scanner offline environment
+on:
+  pull_request:
+    paths:
+      - '.oss-scanner/**'
+      - '.github/workflows/oss-scanner.yml'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-environment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build analysis image with source and cached dependencies
+        run: docker build -f .oss-scanner/Dockerfile -t membrane-oss-scanner .
+      - name: Run default-feature tests without external networking
+        run: docker run --rm --network none membrane-oss-scanner cargo test --workspace --frozen
+      - name: Run all-feature tests without external networking
+        run: docker run --rm --network none membrane-oss-scanner cargo test --workspace --all-features --frozen
