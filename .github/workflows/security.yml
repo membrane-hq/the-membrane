@@ -15,11 +15,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo install cargo-audit --locked --version 0.22.2
-      # Advisories are reported in the job log. The step does not fail the job yet:
-      # the lockfile currently has known advisories (nostr 0.38 and others) that need
-      # a dependency upgrade. Remove continue-on-error once cargo audit is clean.
+      # Ignored advisories, with reasons, live in .cargo/audit.toml.
       - run: cargo audit
-        continue-on-error: true
   secret-scan:
     runs-on: ubuntu-latest
     steps:

@@ -99,7 +99,7 @@ impl BusPublisher {
         }
 
         let client = self.connect().await?;
-        client.send_event(nostr_event.clone()).await?;
+        client.send_event(&nostr_event).await?;
         info!(
             event_id = %event_id.to_hex(),
             kind = membrane_kind_for(event.event_type),
@@ -179,7 +179,7 @@ pub fn parse_membrane_event(event: &Event) -> Result<MembraneEvent> {
     if kind != membrane_kind_for(membrane.event_type) {
         bail!("event kind does not match inner type");
     }
-    if event.created_at.as_u64() != membrane.timestamp as u64 || membrane.timestamp < 0 {
+    if event.created_at.as_secs() != membrane.timestamp as u64 || membrane.timestamp < 0 {
         bail!("envelope timestamp does not match inner timestamp");
     }
     verify_membrane_event_signature(&membrane, &event.pubkey.to_hex())?;
@@ -223,9 +223,7 @@ pub async fn fetch_membrane_bus_events(
         filter = filter.since(Timestamp::from(s as u64));
     }
 
-    let events = client
-        .fetch_events(vec![filter], Duration::from_secs(10))
-        .await?;
+    let events = client.fetch_events(filter, Duration::from_secs(10)).await?;
     let mut parsed = Vec::new();
 
     for event in events {

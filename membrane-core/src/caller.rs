@@ -75,9 +75,12 @@ impl CallerProof {
             .map_err(|e| IacVerifyError::InvalidSignatureHex(e.to_string()))?;
         let signature = nostr::secp256k1::schnorr::Signature::from_slice(&bytes)
             .map_err(|e| IacVerifyError::InvalidSignatureHex(e.to_string()))?;
+        let xonly = public
+            .xonly()
+            .map_err(|e| IacVerifyError::InvalidSignerPubkey(e.to_string()))?;
         let msg = nostr::secp256k1::Message::from_digest(self.digest(audience, path, body, iac)?);
         nostr::secp256k1::Secp256k1::verification_only()
-            .verify_schnorr(&signature, &msg, &public)
+            .verify_schnorr(&signature, &msg, &xonly)
             .map_err(|_| IacVerifyError::InvalidSignature)?;
         Ok(key.into())
     }
