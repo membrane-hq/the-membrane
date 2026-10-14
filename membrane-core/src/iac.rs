@@ -184,7 +184,10 @@ impl IntentAuthorizationCredential {
             .map_err(|e| IacVerifyError::InvalidSignatureHex(e.to_string()))?;
 
         let secp = nostr::secp256k1::Secp256k1::verification_only();
-        secp.verify_schnorr(&sig, &message, &pubkey)
+        let xonly = pubkey
+            .xonly()
+            .map_err(|e| IacVerifyError::InvalidSignerPubkey(e.to_string()))?;
+        secp.verify_schnorr(&sig, &message, &xonly)
             .map_err(|_| IacVerifyError::InvalidSignature)
     }
 }
