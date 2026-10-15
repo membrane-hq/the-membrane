@@ -13,7 +13,7 @@ default-members = ["membrane-cli"]
 version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
-repository = "https://github.com/Z0rlord/the-membrane"
+repository = "https://github.com/membrane-hq/the-membrane"
 authors = ["Zorie R. Barber"]
 
 [workspace.dependencies]
