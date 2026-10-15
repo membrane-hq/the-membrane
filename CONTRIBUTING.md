@@ -33,4 +33,19 @@ The Membrane is early-stage, single-maintainer software. Bug reports, tests, doc
 
 ## Licensing of contributions
 
-Code in this repository is licensed under AGPL-3.0-only (see [LICENSE-AGPL-3.0](LICENSE-AGPL-3.0)). Documentation is licensed under CC BY 4.0 (see [LICENSE](LICENSE)). By submitting a pull request you confirm that you wrote the contribution or have the right to submit it, and that it may be distributed under the license that applies to the files you changed.
+Contributions are accepted under the license of the files they change (inbound = outbound):
+
+- Code is licensed under AGPL-3.0-only (see [LICENSE](LICENSE)).
+- Documentation and research documents are licensed under CC BY 4.0 (see [LICENSE-CC-BY-4.0](LICENSE-CC-BY-4.0)).
+
+There is no contributor license agreement. You keep the copyright in your contribution.
+
+## Sign off your commits (DCO)
+
+Every commit in a pull request must carry a `Signed-off-by` line, which certifies the [Developer Certificate of Origin 1.1](https://developercertificate.org/): that you wrote the change or have the right to submit it under the license of the files you changed. Add it with `git commit -s`:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+Use your real name and an email address you control. If you forgot, run `git commit --amend -s` for the last commit, or `git rebase --signoff main` for several, then force-push your branch.
