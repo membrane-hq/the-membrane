@@ -6,8 +6,28 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # nostr and nostr-sdk are pinned together on purpose (nostr 0.44.x,
+      # nostr-sdk 0.44). Upgrade them by hand, in one change.
+      - dependency-name: nostr-sdk
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: nostr
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
