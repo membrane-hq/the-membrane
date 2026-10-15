@@ -32,5 +32,5 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-rcgen = "0.13"
+rcgen = "0.14"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
