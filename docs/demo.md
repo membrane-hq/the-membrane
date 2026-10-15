@@ -9,17 +9,22 @@ tool access. For the operator full stack (relay + gate + your signed IAC), see
 [README § Full stack (operators)](../README.md#full-stack-operators). Repo
 overview: [README § Local demo dashboard](../README.md#local-demo-dashboard).
 
-## Public sandbox
+## Hosted page
 
 Open **https://membrane-demo.dojopop.live**.
 
-The hosted dashboard demonstrates gate authorization and receipt-chain logic,
-but all Jira, Slack, and GitHub actions are local simulations. It has no
-production credentials or production network access. State is isolated by an
-opaque browser session, expires after 30 minutes, and is also cleared on
-restart. Do not enter secrets, customer data, or other sensitive information.
-GitHub mutations belong on the production gate with a configured connector
-([github-connector.md](github-connector.md)) - never on this sandbox.
+The hosted page is static. It shows the six-step flow below as a recorded
+replay of one real `membrane demo` run, then a simulated operator view with
+invented traffic. No gate runs behind it and nothing is sent anywhere. It is
+the same flow as the local demo, not the same page: only the local demo runs
+the gate code live.
+
+A live hosted sandbox (per-session state, real signing) is a separate container
+deployment, described in [deploy/demo/README.md](../deploy/demo/README.md). It
+is not what the URL above serves today. Do not enter secrets, customer data, or
+other sensitive information in any demo. GitHub mutations belong on the
+production gate with a configured connector ([github-connector.md](github-connector.md)),
+never on a sandbox.
 
 ## Run locally with one command
 
