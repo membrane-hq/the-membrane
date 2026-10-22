@@ -2,7 +2,7 @@
 
 Runs a real gate locally, sends one signed call that is allowed, then replays it and sends one without a caller proof. Both are refused.
 
-Requires Rust (stable), a C toolchain, `git`, `jq` and `curl`. No Docker, relay or paid API. First build takes one to two minutes.
+Requires Rust (stable), a C toolchain, `git`, `jq` and `curl`. No Docker and no paid API. First build takes one to two minutes.
 
 ```bash
 # 1. build
@@ -41,7 +41,7 @@ Send each signed request within 60 seconds of signing. Each request needs a new 
 
 ## Notes
 
-- Without a relay, `iac issue` and `gate start` wait roughly 10 to 20 seconds and log connection errors. A relay is required to publish receipts, sever a session and export evidence. For a local relay, use the [operator walkthrough](operator-walkthrough.md).
+- This quickstart runs without a relay. Without one, `iac issue` and `gate start` wait roughly 10 to 20 seconds and log connection errors, then continue. A relay adds receipt publishing, ending sessions and evidence export. To run one locally, use the [operator walkthrough](operator-walkthrough.md).
 - `MEMBRANE_DEV_MOCK_MODEL=1` returns a canned model reply. It is for local checks only.
 - Clean up with `kill %1` and `rm -r "$PILOT_DIR"`.
 - Next: [caller identity](caller-identity.md) and the [GitHub connector](github-connector.md).
