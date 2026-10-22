@@ -4,7 +4,7 @@ Operator vertical slice for The Membrane: allowlisted GitHub mutations go throug
 the production gate (`POST /v1/tools/invoke`) with live IAC, CP receipts, sever,
 and SIEM export. This is **not** the public demo simulator.
 
-The hosted sandbox at `membrane-demo.dojopop.live` stays simulation-only and must
+The hosted sandbox at `demo.themembrane.org` stays simulation-only and must
 not receive operator GitHub tokens.
 
 ## Tools

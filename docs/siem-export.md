@@ -105,7 +105,7 @@ curl -fsS 'http://127.0.0.1:8790/demo/api/siem?format=jsonl'
 ```
 
 The hosted sandbox uses the same routes at
-`https://membrane-demo.dojopop.live`. Every demo record has
+`https://demo.themembrane.org`. Every demo record has
 `"simulation": true`.
 
 ## Ingestion patterns

@@ -5,7 +5,7 @@ The Membrane is early-stage, single-maintainer software. Bug reports, tests, doc
 ## Before you start
 
 - For anything larger than a small fix, open an issue first so we can agree on scope before you write code.
-- Security problems: do not open a public issue. Follow [SECURITY.md](SECURITY.md) and email membrane@dojopop.live.
+- Security problems: do not open a public issue. Follow [SECURITY.md](SECURITY.md) and email membrane@themembrane.org.
 - Questions and bug reports go in [GitHub issues](https://github.com/membrane-hq/the-membrane/issues). Please include the commit you ran, what you expected, what happened, and a minimal reproduction.
 
 ## Making a change

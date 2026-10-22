@@ -7,7 +7,7 @@ using the gate with production credentials or write access.
 
 ## Report a vulnerability
 
-Email membrane@dojopop.live with a private report. Include the affected commit,
+Email membrane@themembrane.org with a private report. Include the affected commit,
 component, expected behavior, observed behavior and a minimal reproduction if
 possible. Do not include passwords, tokens, private signing keys or customer data.
 Do not post an exploit or sensitive details in a public issue.
