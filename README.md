@@ -16,7 +16,8 @@ The Rust workspace includes the authorization gate, CLI, receipt and attestation
 
 The repo also includes a demo of the operator workflow: authorization checks and receipt chaining. It uses ephemeral keys and an in-memory bus, and tool effects are simulated.
 
-- **Run the software:** configure your operator registry, relay, signed IACs, caller keys and grants. Connect the gate to your model backend and supported tools. See [caller identity](docs/caller-identity.md) and the [GitHub connector](docs/github-connector.md).
+- **Quickstart:** [clone to a refused call in about five minutes](docs/quickstart.md), no Docker or relay.
+- **Run the software:** configure your operator registry, signed IACs, caller keys and grants, plus a relay if you want published receipts, severance and evidence export. Connect the gate to your model backend and supported tools. See [caller identity](docs/caller-identity.md) and the [GitHub connector](docs/github-connector.md).
 - **Try the demo:** open [demo.themembrane.org](https://demo.themembrane.org) for a recorded replay of the six-step flow, or run `membrane demo` locally for the live one.
 - **Export telemetry:** use JSON Lines or OCSF-inspired SIEM export, with an optional fail-open webhook shipper. The demo does not send webhook traffic.
 
@@ -69,7 +70,7 @@ Detection after publication is always behind the leak. A fail-closed gate makes 
 
 - **Rust (stable) with Cargo.** Install with [rustup](https://rustup.rs): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`. Built and tested on stable Rust 1.99; older toolchains have not been verified.
 - A C toolchain and `git` for building dependencies (`build-essential` on Debian/Ubuntu).
-- Docker, only for the optional local Nostr relay in the operator full-stack path. The demo needs no Docker.
+- Docker, only if you want the optional local Nostr relay from the operator walkthrough. The demo and the [quickstart](docs/quickstart.md) need neither Docker nor a relay.
 
 First build takes about a minute. Check your setup with `cargo test --workspace`.
 
@@ -92,6 +93,13 @@ The operator and caller have separate signing keys. The gate requires an
 operator-signed, caller-bound IAC, an exact registry identity grant, and a fresh
 caller proof on every production request. The bundled registry deliberately
 denies all callers. Copying its defaults is not a working authorization setup.
+
+The gate authenticates callers and refuses replayed or unproven requests
+without a relay or Docker (see the [quickstart](docs/quickstart.md)). A relay is
+needed to publish receipts to the attestation bus, to sever a session and to run
+`membrane evidence export`. Without one, `membrane iac issue` and
+`membrane gate start` each wait roughly 10 to 20 seconds on connection retries
+and log connection errors, then continue.
 
 Run the [operator walkthrough](docs/operator-walkthrough.md) from a fresh clone.
 It builds the shipped CLI, generates local test keys, writes an exact grant,

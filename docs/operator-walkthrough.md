@@ -1,6 +1,6 @@
 # Operator walkthrough
 
-Run from the repository root with Rust, Docker, jq and curl installed. Use a new,
+Run from the repository root with Rust, jq and curl installed. Docker is needed only for the local relay in step 1; the signed call and replay refusal in steps 3 to 5 work without a relay (see the [quickstart](quickstart.md)). The relay is required to publish receipts, sever a session and export evidence (step 6). Without one, `iac issue` and `gate start` wait roughly 10 to 20 seconds on connection retries and log connection errors. Use a new,
 private scratch directory for each run. This check uses the production gate's
 caller authentication and relay receipts, with an explicitly enabled canned
 model reply. It is not the public demo or a live model integration test.
