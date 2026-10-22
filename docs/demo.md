@@ -11,7 +11,7 @@ overview: [README § Local demo dashboard](../README.md#local-demo-dashboard).
 
 ## Hosted page
 
-Open **https://membrane-demo.dojopop.live**.
+Open **https://demo.themembrane.org**.
 
 The hosted page is static. It shows the six-step flow below as a recorded
 replay of one real `membrane demo` run, then a simulated operator view with

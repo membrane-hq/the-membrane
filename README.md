@@ -4,7 +4,7 @@ The Membrane is a fail-closed authorization gateway for AI agents with productio
 
 The Membrane began with the concept of a firewall between human cognition and AI silicon, developed in the [cognitive boundary research](docs/whitepaper.md); the agent gate applies that boundary to model and tool calls.
 
-**Public landing:** [membrane.dojopop.live](https://membrane.dojopop.live) · source in [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site)
+**Public landing:** [themembrane.org](https://themembrane.org) · source in [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site)
 
 ## Run it under your own control
 
@@ -17,7 +17,7 @@ The Rust workspace includes the authorization gate, CLI, receipt and attestation
 The repo also includes a demo of the operator workflow: authorization checks and receipt chaining. It uses ephemeral keys and an in-memory bus, and tool effects are simulated.
 
 - **Run the software:** configure your operator registry, relay, signed IACs, caller keys and grants. Connect the gate to your model backend and supported tools. See [caller identity](docs/caller-identity.md) and the [GitHub connector](docs/github-connector.md).
-- **Try the demo:** open [membrane-demo.dojopop.live](https://membrane-demo.dojopop.live) for a recorded replay of the six-step flow, or run `membrane demo` locally for the live one.
+- **Try the demo:** open [demo.themembrane.org](https://demo.themembrane.org) for a recorded replay of the six-step flow, or run `membrane demo` locally for the live one.
 - **Export telemetry:** use JSON Lines or OCSF-inspired SIEM export, with an optional fail-open webhook shipper. The demo does not send webhook traffic.
 
 ## Documents
@@ -29,7 +29,7 @@ The repo also includes a demo of the operator workflow: authorization checks and
 | [docs/reference-stack.md](docs/reference-stack.md) | Self-hosted deployment with local models, including air-gapped operation |
 | [docs/siem-export.md](docs/siem-export.md) | Vendor-neutral SIEM/SOC export (JSON Lines and OCSF-inspired JSON) |
 | [docs/github-connector.md](docs/github-connector.md) | GitHub connector configuration |
-| [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site) | Public site repository ([membrane.dojopop.live](https://membrane.dojopop.live)) |
+| [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site) | Public site repository ([themembrane.org](https://themembrane.org)) |
 | [docs/demo.md](docs/demo.md) | Local product dashboard - one-command demo |
 | [docs/whitepaper.md](docs/whitepaper.md) | Cognitive-boundary research specification (not operator documentation) |
 | [docs/appendix-open-research.md](docs/appendix-open-research.md) | Open-source BCI stacks, security research, Phase 0 path |
@@ -75,7 +75,7 @@ First build takes about a minute. Check your setup with `cargo test --workspace`
 
 ## Local demo dashboard
 
-No secrets, relay, or paid APIs needed. The hosted page at [membrane-demo.dojopop.live](https://membrane-demo.dojopop.live) is a recorded replay of one real run (no gate behind it), followed by a simulated operator view. To run the live demo, run it locally. The landing and dashboard sources live in [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site); run its static preview from that repository.
+No secrets, relay, or paid APIs needed. The hosted page at [demo.themembrane.org](https://demo.themembrane.org) is a recorded replay of one real run (no gate behind it), followed by a simulated operator view. To run the live demo, run it locally. The landing and dashboard sources live in [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site); run its static preview from that repository.
 
 ```bash
 cargo run -p membrane-cli --features demo -- demo
