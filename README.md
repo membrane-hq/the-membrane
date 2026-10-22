@@ -16,7 +16,7 @@ The Rust workspace includes the authorization gate, CLI, receipt and attestation
 
 The repo also includes a demo of the operator workflow: authorization checks and receipt chaining. It uses ephemeral keys and an in-memory bus, and tool effects are simulated.
 
-- **Quickstart:** [clone to a refused call in about five minutes](docs/quickstart.md), no Docker or relay.
+- **Quickstart:** [clone to a refused call in about five minutes](docs/quickstart.md), no Docker and no paid API.
 - **Run the software:** configure your operator registry, signed IACs, caller keys and grants, plus a relay if you want published receipts, severance and evidence export. Connect the gate to your model backend and supported tools. See [caller identity](docs/caller-identity.md) and the [GitHub connector](docs/github-connector.md).
 - **Try the demo:** open [demo.themembrane.org](https://demo.themembrane.org) for a recorded replay of the six-step flow, or run `membrane demo` locally for the live one.
 - **Export telemetry:** use JSON Lines or OCSF-inspired SIEM export, with an optional fail-open webhook shipper. The demo does not send webhook traffic.
