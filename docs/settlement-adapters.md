@@ -45,3 +45,24 @@ This direction does not make the Membrane a wallet, mint, custodian, exchange, o
 - [Routstr payment flow](https://docs.routstr.com/client/payments/) and [refund semantics](https://docs.routstr.com/api/endpoints/).
 - [Crossmint Agent Wallets](https://docs.crossmint.com/agents/wallets/overview), [x402](https://docs.crossmint.com/agents/payment-flows/x402), and [MPP](https://docs.crossmint.com/agents/payment-flows/mpp).
 - [Crossmint regulatory scope](https://docs.crossmint.com/stablecoin-orchestration/concepts/regulatory-landscape) and [service terms](https://www.crossmint.com/legal/crossmint-terms-of-service/TRGUSAALLALLALL).
+
+## Live verification, 2026-10-22 (routstr rail)
+
+Verified end to end with real ecash against node `https://routstr.eduvietkieu.com`
+(Hana Gateway v0.4.7, mint `https://mint.minibits.cash/Bitcoin`), model
+`claude-haiku-4-5`, through the gate's `POST /v1/spend/chat`:
+
+- Funded by importing a 2,000-sat cashu token via `GET /v1/balance/create`,
+  which issued an `sk-` key with a 2,000,000 msat balance.
+- Settled call: reserved ceiling = final cost = 102 msat at operator policy
+  prices; the node's own meter charged 13 msat.
+- Same `operation_id` twice: second call refused (409), never dispatched.
+- Tiny-budget identity: second call blocked (402) once the budget could not
+  cover the ceiling.
+- A hanging upstream (`deepseek-v4-flash` on this node, unresponsive >120s at
+  test time) exercised the real failure path: the ceiling stayed held as
+  `uncertain` for reconciliation and the operation stayed replay-safe. A
+  timeout is not proof nothing was paid. Prefer a verified-responsive model;
+  `claude-haiku-4-5` answered in ~3s.
+- Remaining balance withdrawn via `POST /v1/balance/refund` as a cashu token;
+  lifetime spend 84 msat.
