@@ -3,9 +3,9 @@
 //! A `Secret` cannot be printed, logged or serialised by accident: `Debug` is
 //! redacted, there is no `Display` or `Serialize`, the bytes are zeroed on drop,
 //! and the only way to read the value is the explicit `expose()` call at the
-//! point of use. Loading prefers a 0600 file over an environment variable, and
-//! an environment variable is removed from the process environment once read,
-//! so child processes do not inherit it.
+//! point of use. Loading prefers a private file over an environment variable.
+//! The environment fallback is not removed from the process environment;
+//! child processes can inherit it. Prefer the file source.
 
 use std::fmt;
 use std::path::Path;
