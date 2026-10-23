@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::info;
 
+use crate::secret::{Secret, SecretError};
+
 /// Post a comment on an issue or pull request (same GitHub Issues Comments API).
 pub const TOOL_GITHUB_COMMENT: &str = "github.comment";
 /// Merge a pull request — typically denied by omitting from the IAC allowlist.
@@ -19,6 +21,9 @@ pub const TOOL_GITHUB_ISSUE_READ: &str = "github.issue.read";
 
 pub const ENV_TOKEN_PRIMARY: &str = "MEMBRANE_GITHUB_TOKEN";
 pub const ENV_TOKEN_FALLBACK: &str = "GITHUB_TOKEN";
+/// Path to a file holding the token. Preferred over the environment variables:
+/// the value never sits in the process environment or on a command line.
+pub const ENV_TOKEN_FILE: &str = "MEMBRANE_GITHUB_TOKEN_FILE";
 /// When set to `1`/`true`, ignored integration tests may hit live GitHub.
 pub const ENV_INTEGRATION: &str = "MEMBRANE_GITHUB_INTEGRATION";
 
@@ -34,6 +39,8 @@ pub enum GitHubConnectorError {
     InvalidArgs(String),
     #[error("GitHub API error ({status}): {message}")]
     Api { status: u16, message: String },
+    #[error("refusing to send the GitHub token to {0}: only https://api.github.com or loopback")]
+    CredentialDestination(String),
     #[error("HTTP client error: {0}")]
     Http(String),
 }
@@ -44,24 +51,56 @@ pub struct GitHubConnectorConfig {
     pub repo_allowlist: Vec<String>,
     /// Override API base (tests). Default: https://api.github.com
     pub api_base: String,
-    /// Token from env; never logged.
-    pub token: Option<String>,
+    /// Connector credential. Redacted in Debug, zeroed on drop.
+    pub token: Option<Secret>,
 }
 
 impl GitHubConnectorConfig {
-    pub fn from_env(repo_allowlist: Vec<String>) -> Self {
-        let token = std::env::var(ENV_TOKEN_PRIMARY)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var(ENV_TOKEN_FALLBACK)
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            });
-        Self {
+    /// Load the token from `MEMBRANE_GITHUB_TOKEN_FILE`, else from
+    /// `MEMBRANE_GITHUB_TOKEN` / `GITHUB_TOKEN`. Environment variables are
+    /// removed from the process after reading. A configured file that cannot be
+    /// used is an error and never falls back to the environment.
+    pub fn try_from_env(repo_allowlist: Vec<String>) -> Result<Self, SecretError> {
+        let token = Secret::load(ENV_TOKEN_FILE, &[ENV_TOKEN_PRIMARY, ENV_TOKEN_FALLBACK])?;
+        Ok(Self {
             repo_allowlist,
             api_base: "https://api.github.com".into(),
             token,
+        })
+    }
+
+    /// Like `try_from_env`, but an unusable credential file leaves the
+    /// connector without a token, so mutating calls fail closed.
+    pub fn from_env(repo_allowlist: Vec<String>) -> Self {
+        Self::try_from_env(repo_allowlist.clone()).unwrap_or_else(|err| {
+            tracing::error!(%err, "github token not loaded; connector has no token");
+            Self {
+                repo_allowlist,
+                api_base: "https://api.github.com".into(),
+                token: None,
+            }
+        })
+    }
+
+    /// The token is attached only to `https://api.github.com`, or to a
+    /// loopback address for local tests. Production never sets another base
+    /// (`from_env` fixes it), so this guards against a future code path or
+    /// config option pointing the credential at another host.
+    pub fn check_token_destination(&self) -> Result<(), GitHubConnectorError> {
+        let denied = || GitHubConnectorError::CredentialDestination(self.api_base.clone());
+        let url = reqwest::Url::parse(&self.api_base).map_err(|_| denied())?;
+        let host = url
+            .host_str()
+            .unwrap_or("")
+            .trim_matches(|c| c == '[' || c == ']');
+        let loopback = host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        match url.scheme() {
+            "https" if host == "api.github.com" && url.port().is_none() => Ok(()),
+            "http" if loopback => Ok(()),
+            _ => Err(denied()),
         }
     }
 
@@ -214,9 +253,11 @@ impl GitHubConnector {
         if matches!(
             req.tool.as_str(),
             TOOL_GITHUB_COMMENT | TOOL_GITHUB_MERGE | TOOL_GITHUB_ISSUE_READ
-        ) && !self.config.has_token()
-        {
-            return Err(GitHubConnectorError::TokenMissing);
+        ) {
+            if !self.config.has_token() {
+                return Err(GitHubConnectorError::TokenMissing);
+            }
+            self.config.check_token_destination()?;
         }
         Ok(())
     }
@@ -230,7 +271,7 @@ impl GitHubConnector {
         let token = self
             .config
             .token
-            .as_deref()
+            .as_ref()
             .ok_or(GitHubConnectorError::TokenMissing)?;
 
         info!(
@@ -269,7 +310,7 @@ impl GitHubConnector {
         let response = self
             .client
             .get(url)
-            .bearer_auth(self.config.token.as_deref().unwrap())
+            .bearer_auth(self.config.token.as_ref().unwrap().expose())
             .header("Accept", "application/vnd.github+json")
             .send()
             .await
@@ -320,7 +361,7 @@ impl GitHubConnector {
 
     async fn post_comment(
         &self,
-        token: &str,
+        token: &Secret,
         req: &ToolInvokeRequest,
     ) -> Result<ToolReceiptContext, GitHubConnectorError> {
         let number = req.issue_number.or(req.pull_number).unwrap();
@@ -335,7 +376,7 @@ impl GitHubConnector {
         let resp = self
             .client
             .post(&url)
-            .bearer_auth(token)
+            .bearer_auth(token.expose())
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .json(&json!({ "body": body }))
@@ -350,7 +391,7 @@ impl GitHubConnector {
         if !(200..300).contains(&status) {
             return Err(GitHubConnectorError::Api {
                 status,
-                message: redact_tokenish(&text),
+                message: redact_tokenish(&token.scrub(&text)),
             });
         }
         let parsed: Value = serde_json::from_str(&text).unwrap_or(json!({}));
@@ -372,7 +413,7 @@ impl GitHubConnector {
 
     async fn merge_pull(
         &self,
-        token: &str,
+        token: &Secret,
         req: &ToolInvokeRequest,
     ) -> Result<ToolReceiptContext, GitHubConnectorError> {
         let pull_number = req.pull_number.unwrap();
@@ -390,7 +431,7 @@ impl GitHubConnector {
         let resp = self
             .client
             .put(&url)
-            .bearer_auth(token)
+            .bearer_auth(token.expose())
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .json(&payload)
@@ -405,7 +446,7 @@ impl GitHubConnector {
         if !(200..300).contains(&status) {
             return Err(GitHubConnectorError::Api {
                 status,
-                message: redact_tokenish(&text),
+                message: redact_tokenish(&token.scrub(&text)),
             });
         }
         let parsed: Value = serde_json::from_str(&text).unwrap_or(json!({}));
@@ -427,7 +468,7 @@ impl GitHubConnector {
 
     async fn read_issue(
         &self,
-        token: &str,
+        token: &Secret,
         req: &ToolInvokeRequest,
     ) -> Result<ToolReceiptContext, GitHubConnectorError> {
         let number = req.issue_number.or(req.pull_number).unwrap();
@@ -441,7 +482,7 @@ impl GitHubConnector {
         let resp = self
             .client
             .get(&url)
-            .bearer_auth(token)
+            .bearer_auth(token.expose())
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
@@ -455,7 +496,7 @@ impl GitHubConnector {
         if !(200..300).contains(&status) {
             return Err(GitHubConnectorError::Api {
                 status,
-                message: redact_tokenish(&text),
+                message: redact_tokenish(&token.scrub(&text)),
             });
         }
         let parsed: Value = serde_json::from_str(&text).unwrap_or(json!({}));
@@ -637,6 +678,84 @@ mod tests {
         assert_eq!(ctx.result.as_ref().unwrap()["comment_id"], 99);
         let _ = tx.send(());
         let _addr: SocketAddr = addr;
+    }
+
+    fn comment_req() -> ToolInvokeRequest {
+        ToolInvokeRequest {
+            operation_id: Some("op".into()),
+            tool: TOOL_GITHUB_COMMENT.into(),
+            model: "demo".into(),
+            owner: "acme".into(),
+            repo: "allowed".into(),
+            issue_number: Some(3),
+            pull_number: None,
+            body: Some("hi".into()),
+            commit_title: None,
+        }
+    }
+
+    #[test]
+    fn config_debug_does_not_show_token() {
+        let config = GitHubConnectorConfig {
+            repo_allowlist: vec!["acme/allowed".into()],
+            api_base: "https://api.github.com".into(),
+            token: Some("synthetic-token-debug-check".into()),
+        };
+        assert!(!format!("{config:?}").contains("synthetic-token-debug-check"));
+    }
+
+    #[test]
+    fn token_is_only_sent_to_api_github_com_or_loopback() {
+        let mut config = cfg(&["acme/allowed"]);
+        for ok in [
+            "https://api.github.com",
+            "http://127.0.0.1:8080",
+            "http://localhost:1",
+        ] {
+            config.api_base = ok.into();
+            assert!(config.check_token_destination().is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://api.github.com",
+            "http://evil.example",
+            "ftp://127.0.0.1",
+            "not a url",
+        ] {
+            config.api_base = bad.into();
+            assert!(config.check_token_destination().is_err(), "{bad}");
+        }
+        config.api_base = "http://evil.example".into();
+        let connector = GitHubConnector::new(config);
+        assert!(matches!(
+            connector.preflight(&comment_req()),
+            Err(GitHubConnectorError::CredentialDestination(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn upstream_error_that_echoes_the_token_is_scrubbed() {
+        use axum::{http::StatusCode, routing::post, Router};
+        let app = Router::new().route(
+            "/repos/acme/allowed/issues/3/comments",
+            post(|| async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "bad credentials: synthetic-echoed-token-77",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+        let connector = GitHubConnector::new(GitHubConnectorConfig {
+            repo_allowlist: vec!["acme/allowed".into()],
+            api_base: format!("http://{addr}"),
+            token: Some("synthetic-echoed-token-77".into()),
+        });
+        let err = connector.execute(&comment_req()).await.unwrap_err();
+        let shown = format!("{err} {err:?}");
+        assert!(!shown.contains("synthetic-echoed-token-77"), "{shown}");
+        assert!(shown.contains("[redacted]"));
     }
 
     #[tokio::test]

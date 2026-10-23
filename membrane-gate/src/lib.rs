@@ -485,6 +485,7 @@ pub mod liveness;
 pub mod proxy;
 pub mod readings;
 pub mod routstr;
+pub mod secret;
 pub mod server;
 pub mod siem_export;
 pub mod spend;
@@ -499,8 +500,8 @@ pub use demo::{
 pub use github::{
     authorize_repo_and_args, body_sha256_hex, is_github_tool, GitHubConnector,
     GitHubConnectorConfig, GitHubConnectorError, ToolInvokeRequest, ToolReceiptContext,
-    ENV_TOKEN_FALLBACK, ENV_TOKEN_PRIMARY, TOOL_GITHUB_COMMENT, TOOL_GITHUB_ISSUE_READ,
-    TOOL_GITHUB_MERGE,
+    ENV_TOKEN_FALLBACK, ENV_TOKEN_FILE, ENV_TOKEN_PRIMARY, TOOL_GITHUB_COMMENT,
+    TOOL_GITHUB_ISSUE_READ, TOOL_GITHUB_MERGE,
 };
 pub use proxy::{ChatMessage, ChatRequest, ChatResponse, LlmProxy};
 pub use server::{run_gate_server, GateServerState, SessionReceipt};

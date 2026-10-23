@@ -19,12 +19,46 @@ not receive operator GitHub tokens.
 
 | Name | Purpose |
 | --- | --- |
-| `MEMBRANE_GITHUB_TOKEN` or `GITHUB_TOKEN` | Fine-grained or classic token — never commit |
+| `MEMBRANE_GITHUB_TOKEN_FILE` | Path to a file holding the token (mode 0600). Preferred: the value never sits in the process environment or on a command line |
+| `MEMBRANE_GITHUB_TOKEN` or `GITHUB_TOKEN` | Fallback. Fine-grained or classic token, never commit. The environment copy stays visible to the process and to `/proc/<pid>/environ`, so prefer the file |
 | `github_repo_allowlist` in channel registry | Explicit `owner/name` list; empty denies all |
 
 Suggested token scopes: classic `repo`, or fine-grained **Issues: Read and write**
 (and **Pull requests: Read and write** if merging is ever allowlisted). Prefer a
 disposable pilot repo.
+
+## Credential handling
+
+The gate applies the connector credential to upstream requests; callers and
+models are not given the token. Callers send a tool request, and nothing in the
+request chooses which credential is used.
+
+- The token is held in a redacted, zeroed-on-drop type. Debug output shows
+  `Secret(<redacted>)`, and the value is read only where the `Authorization`
+  header is built.
+- A configured token file must not be readable by group or others, and a set
+  but unusable file stops startup. It never falls back to the environment.
+- The API base is fixed to `https://api.github.com` in production; no
+  environment variable or registry field changes it. As a second check, the
+  token is attached only to that host, or to loopback for local tests, and the
+  HTTP client does not follow redirects, so a redirect cannot carry the token to
+  another host.
+- If GitHub echoes the token in an error body, the exact value is removed
+  before the error reaches the caller, the receipt or the logs.
+
+Limits: this is local hardening of one connector, not an encrypted delivery
+channel. The request library copies the token into its header value, which is
+not zeroed, and the environment fallback leaves a copy in process memory and
+`/proc/<pid>/environ`. A host-level attacker on the gate machine can still read
+the token.
+
+This borrows two ideas from
+[Bitwarden Agent Access](https://github.com/bitwarden/agent-access) and
+[1Password's agentic autofill](https://support.1password.com/1password-claude-security/):
+apply the secret at the point of use rather than hand it to the model, and treat
+request fields as untrusted claims. The Membrane does not adopt their approval model. Approval stays one
+approval for one dispatch, bound to the exact request, and there is no
+auto-approve window.
 
 Receipts store `body_sha256` digests — not comment body plaintext or tokens.
 

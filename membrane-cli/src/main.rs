@@ -23,7 +23,8 @@ use membrane_core::{
 use membrane_gate::{demo_registry, run_demo_dashboard, DemoRuntime, DemoServerState};
 use membrane_gate::{
     run_gate_server, ChannelRegistry, Gate, GateServerState, GitHubConnector,
-    GitHubConnectorConfig, LlmProxy, RouterSessionRequest, ENV_TOKEN_FALLBACK, ENV_TOKEN_PRIMARY,
+    GitHubConnectorConfig, LlmProxy, RouterSessionRequest, ENV_TOKEN_FALLBACK, ENV_TOKEN_FILE,
+    ENV_TOKEN_PRIMARY,
 };
 
 mod chat;
@@ -799,12 +800,14 @@ async fn gate_start(
     }
     println!("gate: Δt={}s", registry.delta_t_secs);
 
-    let github_cfg = GitHubConnectorConfig::from_env(registry.github_repo_allowlist.clone());
+    let github_cfg = GitHubConnectorConfig::try_from_env(registry.github_repo_allowlist.clone())
+        .map_err(|e| anyhow::anyhow!("GitHub token: {e}"))?;
     let model_api = registry.model_api_url.as_deref().unwrap_or("<mock>");
     println!("gate: IAC ok, model_api={model_api}, listen={listen}");
     println!(
-        "gate: GitHub connector repos={:?} token_env={}/{} configured={}",
+        "gate: GitHub connector repos={:?} token_source={}/{}/{} configured={}",
         registry.github_repo_allowlist,
+        ENV_TOKEN_FILE,
         ENV_TOKEN_PRIMARY,
         ENV_TOKEN_FALLBACK,
         github_cfg.has_token()
