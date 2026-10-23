@@ -15,6 +15,7 @@
 //!
 //! The adapter never grants authority. The funded `sk-` key lives inside the
 //! rail client, is redacted from `Debug`, and appears in no error or receipt.
+use crate::secret::Secret;
 use crate::spend::{BudgetLedger, Reserved, SpendError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -322,6 +323,8 @@ pub struct SpendService {
 pub const ENV_SPEND_DIR: &str = "MEMBRANE_SPEND_DIR";
 pub const ENV_ROUTSTR_POLICY: &str = "MEMBRANE_ROUTSTR_POLICY";
 pub const ENV_ROUTSTR_API_KEY: &str = "MEMBRANE_ROUTSTR_API_KEY";
+/// Path to a 0600 file holding the key. Preferred over the environment variable.
+pub const ENV_ROUTSTR_API_KEY_FILE: &str = "MEMBRANE_ROUTSTR_API_KEY_FILE";
 
 impl SpendService {
     /// Spending is off unless all three variables are set. A partial setup is an
@@ -330,7 +333,7 @@ impl SpendService {
     pub fn from_env() -> anyhow::Result<Option<Self>> {
         let dir = std::env::var_os(ENV_SPEND_DIR);
         let policy = std::env::var_os(ENV_ROUTSTR_POLICY);
-        let key = std::env::var(ENV_ROUTSTR_API_KEY).ok();
+        let key = Secret::load(ENV_ROUTSTR_API_KEY_FILE, &[ENV_ROUTSTR_API_KEY])?;
         let (Some(dir), Some(policy), Some(key)) = (dir, policy, key) else {
             if dir_or_any_set() {
                 anyhow::bail!(
@@ -356,15 +359,20 @@ impl SpendService {
 }
 
 fn dir_or_any_set() -> bool {
-    [ENV_SPEND_DIR, ENV_ROUTSTR_POLICY, ENV_ROUTSTR_API_KEY]
-        .iter()
-        .any(|k| std::env::var_os(k).is_some())
+    [
+        ENV_SPEND_DIR,
+        ENV_ROUTSTR_POLICY,
+        ENV_ROUTSTR_API_KEY,
+        ENV_ROUTSTR_API_KEY_FILE,
+    ]
+    .iter()
+    .any(|k| std::env::var_os(k).is_some())
 }
 
 /// HTTP client for a Routstr node. The `sk-` key never leaves this struct.
 pub struct HttpRoutstr {
     base: String,
-    key: String,
+    key: Secret,
     http: reqwest::Client,
 }
 
@@ -378,9 +386,11 @@ impl fmt::Debug for HttpRoutstr {
 }
 
 impl HttpRoutstr {
-    pub fn new(base: &str, key: String, timeout: Duration) -> Result<Self, RailError> {
+    pub fn new(base: &str, key: Secret, timeout: Duration) -> Result<Self, RailError> {
+        // No redirects: the credential must not follow one to another host.
         let http = reqwest::Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| RailError::NotCharged(e.to_string()))?;
         Ok(Self {
@@ -397,7 +407,7 @@ impl RoutstrRail for HttpRoutstr {
         let resp = self
             .http
             .post(format!("{}/chat/completions", self.base))
-            .bearer_auth(&self.key)
+            .bearer_auth(self.key.expose())
             .header("Idempotency-Key", &call.idempotency_key)
             .json(&call.body)
             .send()
@@ -406,7 +416,7 @@ impl RoutstrRail for HttpRoutstr {
                 if e.is_connect() {
                     RailError::NotCharged("could not connect".into())
                 } else {
-                    RailError::Unknown(redact(&e.to_string(), &self.key))
+                    RailError::Unknown(self.key.scrub(&e.to_string()))
                 }
             })?;
         let status = resp.status();
@@ -427,10 +437,10 @@ impl RoutstrRail for HttpRoutstr {
         let resp = self
             .http
             .get(format!("{}/balance/info", self.base))
-            .bearer_auth(&self.key)
+            .bearer_auth(self.key.expose())
             .send()
             .await
-            .map_err(|e| RailError::Unknown(redact(&e.to_string(), &self.key)))?;
+            .map_err(|e| RailError::Unknown(self.key.scrub(&e.to_string())))?;
         if !resp.status().is_success() {
             return Err(RailError::Unknown(format!("http {}", resp.status())));
         }
@@ -441,14 +451,6 @@ impl RoutstrRail for HttpRoutstr {
         v.get("balance")
             .and_then(Value::as_u64)
             .ok_or_else(|| RailError::Unknown("no balance field".into()))
-    }
-}
-
-fn redact(s: &str, key: &str) -> String {
-    if key.is_empty() {
-        s.to_string()
-    } else {
-        s.replace(key, "<redacted>")
     }
 }
 
@@ -680,9 +682,38 @@ mod tests {
         let s = format!("{c:?}");
         assert!(!s.contains("sk-secret") && s.contains("redacted"));
         assert_eq!(
-            redact("err sk-secret end", "sk-secret"),
-            "err <redacted> end"
+            Secret::new("sk-secret").scrub("err sk-secret end"),
+            "err [redacted] end"
         );
+    }
+
+    #[tokio::test]
+    async fn api_key_does_not_follow_a_redirect() {
+        use axum::{http::StatusCode, routing::any};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let target = axum::Router::new().fallback(any(move || {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }
+        }));
+        let tl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = tl.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(tl, target).await.ok() });
+        let redirect = axum::Router::new().fallback(any(move || async move {
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                [("location", format!("http://{target_addr}/stolen"))],
+            )
+        }));
+        let rl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", rl.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(rl, redirect).await.ok() });
+        let rail = HttpRoutstr::new(&base, "sk-secret".into(), Duration::from_secs(5)).unwrap();
+        assert!(rail.balance_msat().await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -21,6 +21,7 @@
 //! Status: mock-tested, and the HTTP client is tested against a local stand-in
 //! server. It has not been run against Crossmint. No signer implementation
 //! ships, so a live transfer that needs an approval signature stays held.
+use crate::secret::Secret;
 use crate::spend::{BudgetLedger, Reserved, SpendError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,8 @@ const API_VERSION: &str = "2025-06-09";
 
 pub const ENV_CROSSMINT_POLICY: &str = "MEMBRANE_CROSSMINT_POLICY";
 pub const ENV_CROSSMINT_API_KEY: &str = "MEMBRANE_CROSSMINT_API_KEY";
+/// Path to a 0600 file holding the key. Preferred over the environment variable.
+pub const ENV_CROSSMINT_API_KEY_FILE: &str = "MEMBRANE_CROSSMINT_API_KEY_FILE";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossmintPolicy {
@@ -304,7 +307,7 @@ fn pending_message(v: &Value) -> Option<String> {
 /// Crossmint REST client. The API key never leaves this struct.
 pub struct HttpCrossmint {
     policy: CrossmintPolicy,
-    key: String,
+    key: Secret,
     signer: Option<Arc<dyn ApprovalSigner>>,
     http: reqwest::Client,
     polls: u32,
@@ -325,12 +328,15 @@ impl fmt::Debug for HttpCrossmint {
 impl HttpCrossmint {
     pub fn new(
         policy: CrossmintPolicy,
-        key: String,
+        key: Secret,
         signer: Option<Arc<dyn ApprovalSigner>>,
         timeout: Duration,
     ) -> Result<Self, RailError> {
+        // No redirects: X-API-KEY is a custom header and would follow a
+        // cross-host redirect, so the client refuses to follow any.
         let http = reqwest::Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| RailError::NotCharged(e.to_string()))?;
         let mut policy = policy;
@@ -351,9 +357,12 @@ impl HttpCrossmint {
         signer: Option<Arc<dyn ApprovalSigner>>,
     ) -> anyhow::Result<Option<(Self, CrossmintPolicy)>> {
         let path = std::env::var_os(ENV_CROSSMINT_POLICY);
-        let key = std::env::var(ENV_CROSSMINT_API_KEY).ok();
+        let key = Secret::load(ENV_CROSSMINT_API_KEY_FILE, &[ENV_CROSSMINT_API_KEY])?;
         let (Some(path), Some(key)) = (path.clone(), key.clone()) else {
-            if path.is_some() || key.is_some() {
+            if path.is_some()
+                || key.is_some()
+                || std::env::var_os(ENV_CROSSMINT_API_KEY_FILE).is_some()
+            {
                 anyhow::bail!(
                     "crossmint is partly configured: set {ENV_CROSSMINT_POLICY} and {ENV_CROSSMINT_API_KEY} together"
                 );
@@ -383,7 +392,7 @@ impl HttpCrossmint {
     }
 
     fn unknown(&self, e: impl fmt::Display) -> RailError {
-        RailError::Unknown(redact(&e.to_string(), &self.key))
+        RailError::Unknown(self.key.scrub(&e.to_string()))
     }
 
     async fn read(&self, resp: reqwest::Response) -> Result<Value, RailError> {
@@ -413,7 +422,7 @@ impl CrossmintRail for HttpCrossmint {
         let resp = self
             .http
             .post(self.transfers_url())
-            .header("X-API-KEY", &self.key)
+            .header("X-API-KEY", self.key.expose())
             .header("x-idempotency-key", &call.idempotency_key)
             .json(&body)
             .send()
@@ -445,7 +454,7 @@ impl CrossmintRail for HttpCrossmint {
             let resp = self
                 .http
                 .post(url)
-                .header("X-API-KEY", &self.key)
+                .header("X-API-KEY", self.key.expose())
                 .json(&json!({"approvals": [{"signer": signer.locator(), "signature": signature}]}))
                 .send()
                 .await
@@ -468,7 +477,7 @@ impl CrossmintRail for HttpCrossmint {
             let resp = self
                 .http
                 .get(format!("{}/{}", self.transfers_url(), result.id))
-                .header("X-API-KEY", &self.key)
+                .header("X-API-KEY", self.key.expose())
                 .send()
                 .await
                 .map_err(|e| self.unknown(e))?;
@@ -481,14 +490,6 @@ impl CrossmintRail for HttpCrossmint {
             }
         }
         Ok(result)
-    }
-}
-
-fn redact(s: &str, key: &str) -> String {
-    if key.is_empty() {
-        s.to_string()
-    } else {
-        s.replace(key, "<redacted>")
     }
 }
 
@@ -686,9 +687,44 @@ mod tests {
         let d = format!("{rail:?}");
         assert!(!d.contains("sk_secret_value"));
         assert_eq!(
-            redact("boom sk_secret_value", "sk_secret_value"),
-            "boom <redacted>"
+            Secret::new("sk_secret_value").scrub("boom sk_secret_value"),
+            "boom [redacted]"
         );
+    }
+
+    #[tokio::test]
+    async fn api_key_does_not_follow_a_redirect() {
+        use axum::{http::StatusCode, routing::any};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let target = axum::Router::new().fallback(any(move || {
+            let h = h.clone();
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }
+        }));
+        let tl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = tl.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(tl, target).await.ok() });
+        let redirect = axum::Router::new().fallback(any(move || async move {
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                [("location", format!("http://{target_addr}/stolen"))],
+            )
+        }));
+        let rl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", rl.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(rl, redirect).await.ok() });
+        let rail = http_rail(&base, None);
+        let call = TransferCall {
+            idempotency_key: "res-redirect".into(),
+            payee: PAYEE.into(),
+            amount_micro: 1_000_000,
+        };
+        assert!(rail.transfer(&call).await.is_err());
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 
     // ---- HTTP client against a local stand-in for the Crossmint API ----
