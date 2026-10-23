@@ -19,12 +19,38 @@ not receive operator GitHub tokens.
 
 | Name | Purpose |
 | --- | --- |
-| `MEMBRANE_GITHUB_TOKEN` or `GITHUB_TOKEN` | Fine-grained or classic token — never commit |
+| `MEMBRANE_GITHUB_TOKEN_FILE` | Path to a file holding the token (mode 0600). Preferred: the value never sits in the process environment or on a command line |
+| `MEMBRANE_GITHUB_TOKEN` or `GITHUB_TOKEN` | Fallback. Fine-grained or classic token, never commit. Removed from the gate process environment after it is read |
 | `github_repo_allowlist` in channel registry | Explicit `owner/name` list; empty denies all |
 
 Suggested token scopes: classic `repo`, or fine-grained **Issues: Read and write**
 (and **Pull requests: Read and write** if merging is ever allowlisted). Prefer a
 disposable pilot repo.
+
+## Credential handling
+
+The gate is the only process that holds the connector credential. Callers and
+models send a tool request; they never receive the token, and nothing in the
+request chooses which credential is used.
+
+- The token is held in a redacted, zeroed-on-drop type. Debug output shows
+  `Secret(<redacted>)`, and the value is read only where the `Authorization`
+  header is built.
+- A configured token file must not be readable by group or others, and a set
+  but unusable file stops startup. It never falls back to the environment.
+- The token is attached only to an `https` API base, or to loopback for local
+  tests. Any other destination is refused before a request is built.
+- If GitHub echoes the token in an error body, the exact value is removed
+  before the error reaches the caller, the receipt or the logs.
+
+This follows the pattern in
+[Bitwarden Agent Access](https://github.com/bitwarden/agent-access) and
+[1Password's agentic autofill](https://support.1password.com/1password-claude-security/):
+the agent asks for an action, the secret is applied at the point of use by
+software that is not the model, and the request fields are treated as untrusted
+claims. The Membrane does not adopt their approval model. Approval stays one
+approval for one dispatch, bound to the exact request, and there is no
+auto-approve window.
 
 Receipts store `body_sha256` digests — not comment body plaintext or tokens.
 

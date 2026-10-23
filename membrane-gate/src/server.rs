@@ -1208,6 +1208,7 @@ fn map_github_err(err: crate::github::GitHubConnectorError) -> GateError {
         GitHubConnectorError::Api { status, message } => {
             GateError::Connector(format!("GitHub API {status}: {message}"))
         }
+        GitHubConnectorError::CredentialDestination(_) => GateError::Connector(err.to_string()),
         GitHubConnectorError::Http(m) => GateError::Connector(m),
     }
 }
