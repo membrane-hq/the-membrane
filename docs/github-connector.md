@@ -29,8 +29,8 @@ disposable pilot repo.
 
 ## Credential handling
 
-The gate is the only process that holds the connector credential. Callers and
-models send a tool request; they never receive the token, and nothing in the
+The gate applies the connector credential to upstream requests; callers and
+models are not given the token. Callers send a tool request, and nothing in the
 request chooses which credential is used.
 
 - The token is held in a redacted, zeroed-on-drop type. Debug output shows
@@ -52,12 +52,11 @@ not zeroed, and the environment fallback leaves a copy in process memory and
 `/proc/<pid>/environ`. A host-level attacker on the gate machine can still read
 the token.
 
-This follows the pattern in
+This borrows two ideas from
 [Bitwarden Agent Access](https://github.com/bitwarden/agent-access) and
 [1Password's agentic autofill](https://support.1password.com/1password-claude-security/):
-the agent asks for an action, the secret is applied at the point of use by
-software that is not the model, and the request fields are treated as untrusted
-claims. The Membrane does not adopt their approval model. Approval stays one
+apply the secret at the point of use rather than hand it to the model, and treat
+request fields as untrusted claims. The Membrane does not adopt their approval model. Approval stays one
 approval for one dispatch, bound to the exact request, and there is no
 auto-approve window.
 
