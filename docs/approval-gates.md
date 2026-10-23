@@ -38,6 +38,8 @@ Set `MEMBRANE_APPROVAL_STORE` to a file path for the durable approval store. The
    ```
 
    The gate publishes a signed `membrane.approval.decision` event with the approver's OIDC subject, the call hash and the note before the decision takes effect. If publication fails, the hold stays pending.
+
+   The local operator dashboard's approvals view calls the same routes: the operator pastes an OIDC token into the page, the dashboard relays it per request and stores nothing. See [operator-dashboard.md](operator-dashboard.md).
 5. After approval, the caller sends the identical request again with a fresh caller proof. The gate consumes the approval, repeats every check except the tool allowlist, and dispatches. The execution receipt includes the approval ID, call hash and approver in its signed context, so the receipt chain links the hold, the decision and the call.
 6. A second identical call is held again. Rejected, expired and consumed approvals never execute.
 
@@ -56,7 +58,7 @@ The call hash covers the authenticated caller, the IAC scope and the exact reque
 
 - Tool calls only. There is no hold for chat or spend.
 - The caller retries after approval; the gate does not execute on approval alone.
-- Approvers are OIDC operators mapped in the operator configuration. There is no separate approver role, no multi-approver rule and no approval UI. The dashboard does not show holds.
+- Approvers are OIDC operators mapped in the operator configuration. There is no separate approver role and no multi-approver rule. The dashboard approvals view relays the operator's token; it holds no authority of its own.
 - Hold policy is read at startup. Changing `approval` in the registry needs a gate restart.
 - The store is one file on one gate instance.
 - The decision routes are covered by unit tests for the store and the call path. They have not been exercised against a live Okta or Entra tenant.

@@ -1,6 +1,6 @@
 [package]
 name = "membrane-dashboard"
-description = "Local read-only Membrane operator audit dashboard"
+description = "Local Membrane operator dashboard: audit view plus OIDC-authenticated approval decisions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

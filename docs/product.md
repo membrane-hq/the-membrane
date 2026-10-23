@@ -26,7 +26,7 @@ The Membrane is for operators giving agents write access to systems they control
 
 ## Software and demo
 
-The gate, CLI, receipt and attestation components, read-only dashboard and deterministic advisor are working software. The advisor proposes changes for human review; it does not edit policy or grant access.
+The gate, CLI, receipt and attestation components, operator dashboard and deterministic advisor are working software. The advisor proposes changes for human review; it does not edit policy or grant access.
 
 The demo walks through the gate's checks and receipt chaining with ephemeral keys and simulated tool effects. Production integrations require configured backends and supported connectors; research proposals in the whitepaper are not shipped integrations.
 
