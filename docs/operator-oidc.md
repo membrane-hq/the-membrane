@@ -14,7 +14,7 @@ identity has full issuance authority within the caller grants, not a separate
 role. Do not map an entire group or a mutable email address to that authority.
 
 Operators using this exchange do not need the signing secret on their clients.
-The gate still needs its `NOSTR_NSEC` key for IAC signatures, receipts and the
+The gate still needs its [local signing key](signing-key.md) for IAC signatures, receipts and the
 bus. Existing locally signed IACs remain the bootstrap/break-glass path. This
 is operator federation, not an alternative to agent caller keys or caller
 proofs. Chat and tool endpoints still require the existing signed IAC,

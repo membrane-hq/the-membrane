@@ -77,7 +77,7 @@ cargo run --locked -q -p membrane-cli --example operator-request -- \
   setup "$PILOT_DIR" "$OWNER/$REPO"
 export GATE_PUBKEY="$(jq -r .operator_pubkey "$PILOT_DIR/keys.json")"
 export CALLER_PUBKEY="$(jq -r .caller_pubkey "$PILOT_DIR/keys.json")"
-export NOSTR_NSEC="$(jq -r .operator_nsec "$PILOT_DIR/keys.json")"
+export NOSTR_NSEC_FILE="$PILOT_DIR/operator.nsec"
 ```
 
 Use a disposable repository you control, with an existing issue #1. Load
@@ -103,7 +103,7 @@ is true. Keep the token only in the gate process, not the caller environment.
 ```bash
 # Switch to caller. The CLI verifies the operator IAC and signs a fresh proof.
 unset MEMBRANE_GITHUB_TOKEN GITHUB_TOKEN
-export NOSTR_NSEC="$(jq -r .caller_nsec "$PILOT_DIR/keys.json")"
+export NOSTR_NSEC_FILE="$PILOT_DIR/caller.nsec"
 membrane tools invoke --gate-pubkey "$GATE_PUBKEY" --iac "$PILOT_DIR/iac.json" \
   --tool github.issue.read --model sha256:demo-model \
   --owner "$OWNER" --repo "$REPO" --issue-number 1
@@ -122,7 +122,7 @@ membrane tools invoke --gate-pubkey "$GATE_PUBKEY" --iac "$PILOT_DIR/iac.json" \
 # Expected: HTTP 403 and nonzero CLI exit.
 
 # Sever as operator; subsequent fresh-proof invokes on this scope fail closed.
-NOSTR_NSEC="$(jq -r .operator_nsec "$PILOT_DIR/keys.json")" \
+NOSTR_NSEC_FILE="$PILOT_DIR/operator.nsec" \
   membrane sever --scope-id pilot-scope
 membrane evidence export --format jsonl --since-secs 3600 \
   --out "$PILOT_DIR/evidence.jsonl"

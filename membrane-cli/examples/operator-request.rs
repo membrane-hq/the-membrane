@@ -19,6 +19,8 @@ async fn main() -> Result<()> {
             anyhow::ensure!(!path.exists(), "refusing to overwrite keys");
             let operator = Keys::generate();
             let caller = Keys::generate();
+            write_key_file(&dir.join("operator.nsec"), &operator)?;
+            write_key_file(&dir.join("caller.nsec"), &caller)?;
             let keys = serde_json::json!({
                 "operator_nsec": operator.secret_key().to_bech32()?,
                 "operator_pubkey": operator.public_key().to_hex(),
@@ -53,7 +55,10 @@ async fn main() -> Result<()> {
             let gate_pubkey = &args[2];
             let iac: IntentAuthorizationCredential = serde_json::from_slice(&std::fs::read(&args[3])?)?;
             iac.verify_signature(gate_pubkey)?;
-            let keys = membrane_core::keys_from_nsec(&std::env::var("NOSTR_NSEC").context("caller NOSTR_NSEC required")?)?;
+            let keys = membrane_cli::signing_key::SigningKeyArgs {
+                nsec_file: std::env::var_os("NOSTR_NSEC_FILE").map(Into::into),
+                nsec: None,
+            }.load_keys()?;
             anyhow::ensure!(iac.caller_pubkey.as_deref() == Some(keys.public_key().to_hex().as_str()), "wrong caller key");
             let route = &args[4];
             let raw = std::fs::read(&args[5])?;
@@ -104,5 +109,20 @@ fn write_request<T: Serialize>(
             serde_json::to_string(&proof)?
         ),
     )?;
+    Ok(())
+}
+
+fn write_key_file(path: &Path, keys: &Keys) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    let text = membrane_gate::secret::Secret::new(keys.secret_key().to_bech32()?);
+    file.write_all(text.expose().as_bytes())?;
     Ok(())
 }

@@ -16,7 +16,7 @@ export GATE_PUBKEY="$(jq -r .operator_pubkey $PILOT_DIR/keys.json)"
 export CALLER_PUBKEY="$(jq -r .caller_pubkey $PILOT_DIR/keys.json)"
 
 # 3. issue a 15-minute signed scope and start the gate (mock model, local only)
-export NOSTR_NSEC="$(jq -r .operator_nsec $PILOT_DIR/keys.json)"
+export NOSTR_NSEC_FILE="$PILOT_DIR/operator.nsec"
 membrane iac issue --caller-pubkey "$CALLER_PUBKEY" --scope-id pilot-scope \
   --model sha256:demo-model --ttl-secs 900 --out "$PILOT_DIR/iac.json"
 MEMBRANE_DEV_MOCK_MODEL=1 membrane gate start --registry "$PILOT_DIR/registry.yaml" \
@@ -24,7 +24,7 @@ MEMBRANE_DEV_MOCK_MODEL=1 membrane gate start --registry "$PILOT_DIR/registry.ya
 until curl -fsS http://127.0.0.1:8787/health >/dev/null; do sleep 1; done
 
 # 4. sign as the caller and send
-export NOSTR_NSEC="$(jq -r .caller_nsec $PILOT_DIR/keys.json)"
+export NOSTR_NSEC_FILE="$PILOT_DIR/caller.nsec"
 echo '{"model":"sha256:demo-model","messages":[{"role":"user","content":"hi"}],"stream":false}' > "$PILOT_DIR/chat.json"
 cargo run --locked -q -p membrane-cli --example operator-request -- sign \
   http://127.0.0.1:8787 "$GATE_PUBKEY" "$PILOT_DIR/iac.json" /v1/chat/completions \

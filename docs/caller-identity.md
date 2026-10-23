@@ -19,7 +19,8 @@ credential: copying it is insufficient to act.
 4. Invoke using the caller key: `membrane tools invoke --gate-pubkey <operator-key>
    --iac iac.json --tool github.comment --model <model> --owner <owner> --repo <repo>
    --issue-number 1 --operation-id <stable-write-id> --body <comment>`. Supply the caller secret through the existing
-   `NOSTR_NSEC` environment or signing-key option, not a checked-in file.
+   `NOSTR_NSEC_FILE` or `--nsec-file` pointing to a private, untracked file.
+   See [signing-key handling](signing-key.md) for precedence and legacy sources.
 
 The local chat command is the self-caller case (operator and caller keys equal).
 It binds new session IACs and sends proofs automatically. Its generated scope still

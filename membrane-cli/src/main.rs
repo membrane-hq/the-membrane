@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use membrane_core::SessionChainState;
 use membrane_core::{
     build_ocsf_inspired_pack, fetch_membrane_bus_events, fetch_membrane_events,
-    fetch_session_chain_bootstrap, keys_from_nsec, membrane_kind_for, npub_from_keys, render_jsonl,
+    fetch_session_chain_bootstrap, membrane_kind_for, npub_from_keys, render_jsonl,
     subscribe_and_compute_bus_root, BusPublisher, BusPublisherConfig, EventType,
     IntentAuthorizationCredential, MembraneEvent, MembranePayload, SiemEvent, SiemWebhookShipper,
     ENV_WEBHOOK_URL,
@@ -26,6 +26,8 @@ use membrane_gate::{
     GitHubConnectorConfig, LlmProxy, RouterSessionRequest, ENV_TOKEN_FALLBACK, ENV_TOKEN_FILE,
     ENV_TOKEN_PRIMARY,
 };
+
+use membrane_cli::signing_key::SigningKeyArgs;
 
 mod chat;
 mod config;
@@ -80,8 +82,8 @@ enum Commands {
     Chat {
         #[arg(long)]
         message: Option<String>,
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long)]
         gate_url: Option<String>,
         #[arg(long, env = "MEMBRANE_RELAY_URL")]
@@ -96,8 +98,8 @@ enum Commands {
     },
     /// Sever the active session (publish degraded alert, invalidate IAC)
     Sever {
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long, env = "MEMBRANE_RELAY_URL")]
         relay_url: Option<String>,
         #[arg(long)]
@@ -119,8 +121,8 @@ enum Commands {
             default_value = "ws://127.0.0.1:7777"
         )]
         relay: String,
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long, default_value = "tools/channel-registry.example.yaml")]
         registry: PathBuf,
     },
@@ -136,8 +138,8 @@ enum BusCommands {
             default_value = "ws://127.0.0.1:7777"
         )]
         relay: String,
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
     },
     /// Subscribe to bus events and recompute bus_root
     Subscribe {
@@ -162,8 +164,8 @@ enum GateCommands {
             default_value = "ws://127.0.0.1:7777"
         )]
         relay: String,
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long, default_value = "tools/channel-registry.example.yaml")]
         registry: PathBuf,
         #[arg(long, default_value = "tools/demo-iac.json")]
@@ -184,8 +186,8 @@ enum RollupCommands {
             default_value = "ws://127.0.0.1:7777"
         )]
         relay: String,
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long, value_name = "YYYY-MM-DD")]
         day: String,
         #[arg(long)]
@@ -193,8 +195,8 @@ enum RollupCommands {
     },
     /// Sign a RollupBundle and write signed JSON
     Sign {
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
@@ -208,8 +210,8 @@ enum RollupCommands {
             default_value = "ws://127.0.0.1:7777"
         )]
         relay: String,
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
@@ -225,8 +227,8 @@ enum RollupCommands {
             default_value = "ws://127.0.0.1:7777"
         )]
         relay: String,
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long, value_name = "YYYY-MM-DD")]
         day: Option<String>,
         #[arg(long, default_value = "/var/lib/membrane/rollup")]
@@ -270,8 +272,8 @@ enum EvidenceCommands {
 enum SessionCommands {
     /// Show chain head, active IAC, and recent activity
     Status {
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long, env = "MEMBRANE_RELAY_URL")]
         relay_url: Option<String>,
         #[arg(long)]
@@ -279,8 +281,8 @@ enum SessionCommands {
     },
     /// List router CP events from the attestation bus
     Receipts {
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long, env = "MEMBRANE_RELAY_URL")]
         relay_url: Option<String>,
         #[arg(long, default_value = "86400")]
@@ -298,8 +300,8 @@ enum IacCommands {
             default_value = "ws://127.0.0.1:7777"
         )]
         relay: String,
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long)]
         model: String,
         #[arg(long)]
@@ -328,8 +330,8 @@ enum IacCommands {
             default_value = "ws://127.0.0.1:7777"
         )]
         relay: String,
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         /// Previous operator-signed IAC (may be expired)
         #[arg(long)]
         previous: PathBuf,
@@ -354,8 +356,8 @@ enum IacCommands {
     },
     /// Sign an IAC JSON file with NOSTR_NSEC
     Sign {
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
@@ -379,8 +381,8 @@ enum ToolsCommands {
         #[arg(long)]
         iac: PathBuf,
         /// Caller signing key (not the operator issuing key).
-        #[arg(long, env = "NOSTR_NSEC")]
-        nsec: Option<String>,
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
         #[arg(long)]
         gate_pubkey: String,
         #[arg(long)]
@@ -588,7 +590,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_chat(
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     gate_url: Option<String>,
     relay_url: Option<String>,
     model: Option<String>,
@@ -617,7 +619,7 @@ async fn run_chat(
 }
 
 async fn run_session_status(
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     relay_url: Option<String>,
     gate_url: Option<String>,
 ) -> Result<()> {
@@ -633,7 +635,7 @@ async fn run_session_status(
 }
 
 async fn run_session_receipts(
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     relay_url: Option<String>,
     since_secs: i64,
 ) -> Result<()> {
@@ -646,7 +648,7 @@ async fn run_session_receipts(
 }
 
 async fn run_sever(
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     relay_url: Option<String>,
     scope_id: Option<String>,
 ) -> Result<()> {
@@ -670,12 +672,11 @@ fn run_init() -> Result<()> {
     Ok(())
 }
 
-fn load_keys(nsec: Option<String>) -> Result<nostr::Keys> {
-    let nsec = nsec.context("NOSTR_NSEC required (set env or --nsec)")?;
-    keys_from_nsec(&nsec)
+fn load_keys(nsec: SigningKeyArgs) -> Result<nostr::Keys> {
+    nsec.load_keys()
 }
 
-async fn bus_publish_test(relay: &str, nsec: Option<String>) -> Result<()> {
+async fn bus_publish_test(relay: &str, nsec: SigningKeyArgs) -> Result<()> {
     let keys = load_keys(nsec)?;
     let publisher = BusPublisher::new(BusPublisherConfig {
         relay_url: relay.to_string(),
@@ -721,7 +722,7 @@ async fn bus_subscribe(relay: &str, since: Option<i64>) -> Result<()> {
 
 async fn gate_start(
     relay: &str,
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     registry_path: &PathBuf,
     iac_path: &PathBuf,
     listen: &str,
@@ -895,7 +896,7 @@ async fn evidence_export(
 }
 
 #[cfg(feature = "ots")]
-async fn rollup_export(relay: &str, nsec: Option<String>, day: &str, out: &PathBuf) -> Result<()> {
+async fn rollup_export(relay: &str, nsec: SigningKeyArgs, day: &str, out: &PathBuf) -> Result<()> {
     let keys = load_keys(nsec)?;
     let (period_start, period_end) = day_bounds_utc(day)?;
     let events = fetch_membrane_events(relay, Some(period_start), 5_000).await?;
@@ -918,7 +919,7 @@ async fn rollup_export(relay: &str, nsec: Option<String>, day: &str, out: &PathB
 }
 
 #[cfg(feature = "ots")]
-fn rollup_sign(nsec: Option<String>, input: &PathBuf, out: &PathBuf) -> Result<()> {
+fn rollup_sign(nsec: SigningKeyArgs, input: &PathBuf, out: &PathBuf) -> Result<()> {
     let keys = load_keys(nsec)?;
     let bundle: RollupBundle =
         serde_json::from_str(&std::fs::read_to_string(input)?).context("parse rollup bundle")?;
@@ -934,7 +935,7 @@ fn rollup_sign(nsec: Option<String>, input: &PathBuf, out: &PathBuf) -> Result<(
 #[cfg(feature = "ots")]
 async fn rollup_stamp(
     relay: &str,
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     input: &PathBuf,
     ots_out: &PathBuf,
     mock: bool,
@@ -995,7 +996,7 @@ async fn rollup_stamp(
 
 struct IacIssueArgs<'a> {
     relay: &'a str,
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     model: &'a str,
     scope_id: Option<&'a str>,
     ttl_secs: i64,
@@ -1096,7 +1097,7 @@ async fn iac_issue(args: IacIssueArgs<'_>) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 async fn iac_reissue(
     relay: &str,
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     previous: &PathBuf,
     ttl_secs: i64,
     parent_cp_hash: Option<&str>,
@@ -1184,7 +1185,7 @@ async fn iac_reissue(
 struct ToolsInvokeArgs<'a> {
     gate_url: &'a str,
     iac_path: &'a PathBuf,
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     gate_pubkey: &'a str,
     tool: &'a str,
     operation_id: Option<&'a str>,
@@ -1285,10 +1286,11 @@ async fn tools_invoke(args: ToolsInvokeArgs<'_>) -> Result<()> {
     Ok(())
 }
 
-fn iac_sign(nsec: Option<String>, input: &PathBuf, out: &PathBuf) -> Result<()> {
+fn iac_sign(nsec: SigningKeyArgs, input: &PathBuf, out: &PathBuf) -> Result<()> {
     let keys = load_keys(nsec)?;
     let mut iac: IntentAuthorizationCredential =
-        serde_json::from_str(&std::fs::read_to_string(input)?).context("parse IAC")?;
+        serde_json::from_str(&std::fs::read_to_string(input).context("read IAC input")?)
+            .context("parse IAC")?;
     iac.sign(&keys).map_err(|e| anyhow::anyhow!("{e}"))?;
     let json = serde_json::to_string_pretty(&iac)?;
     std::fs::write(out, json)?;
@@ -1299,7 +1301,8 @@ fn iac_sign(nsec: Option<String>, input: &PathBuf, out: &PathBuf) -> Result<()> 
 
 fn iac_verify(input: &PathBuf, pubkey: &str) -> Result<()> {
     let iac: IntentAuthorizationCredential =
-        serde_json::from_str(&std::fs::read_to_string(input)?).context("parse IAC")?;
+        serde_json::from_str(&std::fs::read_to_string(input).context("read IAC input")?)
+            .context("parse IAC")?;
     iac.verify_signature(pubkey)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("IAC signature valid for pubkey {pubkey}");
@@ -1309,7 +1312,7 @@ fn iac_verify(input: &PathBuf, pubkey: &str) -> Result<()> {
 #[cfg(feature = "ots")]
 async fn rollup_daily(
     relay: &str,
-    nsec: Option<String>,
+    nsec: SigningKeyArgs,
     day: Option<&str>,
     work_dir: &PathBuf,
     mock: bool,
@@ -1376,7 +1379,7 @@ async fn run_local_demo(listen: &str) -> Result<()> {
     run_demo_dashboard(state, listen).await
 }
 
-async fn run_iac_smoke(relay: &str, nsec: Option<String>, registry_path: &PathBuf) -> Result<()> {
+async fn run_iac_smoke(relay: &str, nsec: SigningKeyArgs, registry_path: &PathBuf) -> Result<()> {
     let keys = load_keys(nsec)?;
     let registry = ChannelRegistry::load(registry_path)?;
     let publisher = BusPublisher::new(BusPublisherConfig {

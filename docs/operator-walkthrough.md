@@ -28,7 +28,7 @@ inheriting earlier severance or chain state. Do not use a public relay for write
 cargo run --locked -q -p membrane-cli --example operator-request -- setup "$PILOT_DIR"
 export GATE_PUBKEY="$(jq -r .operator_pubkey "$PILOT_DIR/keys.json")"
 export CALLER_PUBKEY="$(jq -r .caller_pubkey "$PILOT_DIR/keys.json")"
-export NOSTR_NSEC="$(jq -r .operator_nsec "$PILOT_DIR/keys.json")"
+export NOSTR_NSEC_FILE="$PILOT_DIR/operator.nsec"
 ```
 
 The helper writes owner-only local key material and a registry with an exact
@@ -58,7 +58,7 @@ an exact model ID in both the registry grant and IAC.
 ## 4. Sign as the caller and send with curl
 
 ```bash
-export NOSTR_NSEC="$(jq -r .caller_nsec "$PILOT_DIR/keys.json")"
+export NOSTR_NSEC_FILE="$PILOT_DIR/caller.nsec"
 cat > "$PILOT_DIR/chat.json" <<'JSON'
 {"model":"sha256:demo-model","messages":[{"role":"user","content":"hi"}],"stream":false}
 JSON
@@ -95,7 +95,7 @@ membrane evidence export --format jsonl --since-secs 3600 \
   --out "$PILOT_DIR/evidence.jsonl"
 kill "$GATE_PID"
 docker stop membrane-relay
-unset NOSTR_NSEC
+unset NOSTR_NSEC NOSTR_NSEC_FILE
 ```
 
 Inspect the evidence and local logs before deleting the scratch directory. A

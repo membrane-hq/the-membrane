@@ -237,3 +237,5 @@ policy editor and no other write path. See [local run instructions and limits](d
 Operator IdP integration: [OIDC configuration and token exchange](docs/operator-oidc.md).
 
 SIEM delivery: [hardened export to Splunk, Datadog or a webhook](docs/siem-export-hardened.md).
+
+Signing keys: prefer `NOSTR_NSEC_FILE` or `--nsec-file` over raw values. See [signing-key handling](docs/signing-key.md) for source precedence and limits.
