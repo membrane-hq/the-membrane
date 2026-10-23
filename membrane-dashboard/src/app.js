@@ -1,6 +1,10 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let snapshot = null;
+let operatorToken = null;
+let approvals = null;
+let decisionMessage = '';
+let approvalsFingerprint = '';
 function cell(parent, tag, text, cls) { const el=document.createElement(tag); el.textContent=text; if(cls)el.className=cls; parent.append(el); return el; }
 function renderRows() {
   $('rows').replaceChildren();
@@ -38,4 +42,88 @@ async function poll() {
   try { const response=await fetch('/api/snapshot',{cache:'no-store',signal:AbortSignal.timeout(5000)});if(!response.ok)throw Error();const data=await response.json();const age=Date.now()/1000-data.observed_at;if(data.schema_version!==1||!data.audit_available||age>20||age< -5)throw Error();render(data); }
   catch {clearUnknown('Audit source unavailable or stale. Gate status is not verified. No cached status is shown.');}
 }
-$('filter').addEventListener('change',renderRows);$('search').addEventListener('input',renderRows);document.addEventListener('visibilitychange',()=>{if(document.hidden)clearUnknown('Polling paused while this page is hidden.');else poll();});poll();setInterval(poll,10000);
+function stateBadge(state){const el=document.createElement('span');el.className='badge '+state;el.textContent=state.toUpperCase();return el;}
+function rejectToken(){operatorToken=null;approvals=null;decisionMessage='The gate rejected that operator token. Paste a fresh one to keep deciding.';renderApprovals();}
+function arm(button,fn){
+  if(button.dataset.armed){delete button.dataset.armed;button.disabled=true;fn();return;}
+  button.dataset.armed='1';const label=button.textContent;button.textContent='Confirm '+label.toLowerCase();button.classList.add('armed');
+  setTimeout(()=>{if(button.dataset.armed){delete button.dataset.armed;button.textContent=label;button.classList.remove('armed');}},5000);
+}
+async function decide(id,decision,noteEl,button){
+  try{
+    const body={decision};const note=noteEl.value.trim();if(note)body.note=note;
+    const response=await fetch('/api/approvals/'+id+'/decision',{method:'POST',headers:{'content-type':'application/json','authorization':'Bearer '+operatorToken},body:JSON.stringify(body)});
+    const data=await response.json().catch(()=>({}));
+    if(response.status===401||response.status===403){rejectToken();return;}
+    decisionMessage=data.message||(response.ok?'Decision recorded: '+decision+'. The caller can now retry the exact call.':'Decision failed.');
+  }catch{decisionMessage='Decision failed: dashboard or gate unreachable.';}
+  approvalsFingerprint='';
+  await pollApprovals(true);
+}
+function approvalCard(a){
+  const card=document.createElement('div');card.className='approval';
+  const head=cell(card,'div','','ahead');
+  const what=cell(head,'div','','what');
+  what.append(stateBadge(a.state),document.createTextNode(' '+a.tool+' on '+a.target));
+  cell(head,'div','Requested '+new Date(a.requested_at*1000).toLocaleString(),'meta');
+  const meta=cell(card,'div','','meta');
+  const idEl=cell(meta,'code',(a.identity||'').slice(0,12)+'…','identity');idEl.title=a.identity||'';
+  meta.append(document.createTextNode(' scope '+(a.scope_id||'(none)')+' · hold expires '+new Date(a.expires_at*1000).toLocaleString()));
+  if(a.decided_by){const d=cell(card,'div','','meta');d.textContent=(a.state==='rejected'?'Rejected':'Approved')+' by '+a.decided_by+(a.decided_at?' at '+new Date(a.decided_at*1000).toLocaleString():'')+(a.note?' · note: '+a.note:'')+(a.consumed_at?' · consumed at '+new Date(a.consumed_at*1000).toLocaleString():'');}
+  const details=cell(card,'details','');cell(details,'summary','Held request payload');
+  cell(details,'pre',JSON.stringify(a.request,null,2));
+  if(a.state==='pending'){
+    const acts=cell(card,'div','','acts');
+    const note=cell(acts,'input','');note.type='text';note.placeholder='Optional note for the receipt';note.maxLength=1024;note.setAttribute('aria-label','Decision note');
+    const ok=cell(acts,'button','Approve','act');ok.type='button';
+    const no=cell(acts,'button','Reject','act reject');no.type='button';
+    ok.addEventListener('click',()=>arm(ok,()=>decide(a.id,'approve',note,ok)));
+    no.addEventListener('click',()=>arm(no,()=>decide(a.id,'reject',note,no)));
+  }
+  return card;
+}
+function renderApprovals(force){
+  const list=$('approval-list');const status=$('approval-status');
+  if(!operatorToken){
+    status.textContent=decisionMessage||'Paste the operator OIDC token from your identity provider. It stays in this tab and goes only to the gate with each approvals request.';
+    $('operator-token').hidden=false;$('token-connect').hidden=false;$('token-forget').hidden=true;
+    list.replaceChildren();return;
+  }
+  $('operator-token').hidden=true;$('token-connect').hidden=true;$('token-forget').hidden=false;
+  status.textContent=decisionMessage||'Connected. The token stays in this tab; every decision is authenticated and receipted by the gate.';
+  decisionMessage='';
+  if(!approvals){list.replaceChildren();cell(list,'p','Loading approvals…','empty');return;}
+  if(approvals.state!=='ok'){list.replaceChildren();cell(list,'p',approvals.message,'empty');return;}
+  const items=approvals.items.slice().sort((x,y)=>{
+    const px=x.state==='pending'?0:1,py=y.state==='pending'?0:1;
+    if(px!==py)return px-py;
+    return px===0?x.expires_at-y.expires_at:y.requested_at-x.requested_at;
+  });
+  const fingerprint=JSON.stringify(items);
+  if(fingerprint===approvalsFingerprint&&list.childElementCount)return;
+  if(!force&&list.contains(document.activeElement)&&document.activeElement!==list)return;
+  approvalsFingerprint=fingerprint;
+  list.replaceChildren();
+  if(!items.length){cell(list,'p','No held calls. Nothing is waiting for a decision.','empty');return;}
+  items.forEach(a=>list.append(approvalCard(a)));
+}
+async function pollApprovals(force){
+  if(!operatorToken||document.hidden)return;
+  try{
+    const response=await fetch('/api/approvals',{headers:{'authorization':'Bearer '+operatorToken},cache:'no-store',signal:AbortSignal.timeout(5000)});
+    const data=await response.json().catch(()=>({}));
+    if(response.status===401||response.status===403){rejectToken();return;}
+    if(response.status===404)approvals={state:'disabled',message:'Approval gates are not enabled on this gate. Held calls never open.'};
+    else if(!response.ok)approvals={state:'error',message:'Approvals unavailable: '+(data.message||'gate error')+'. The audit view is unaffected.'};
+    else approvals={state:'ok',items:data.approvals||[]};
+  }catch{approvals={state:'error',message:'Approvals unavailable: gate unreachable. The audit view is unaffected.'};}
+  renderApprovals(force);
+}
+function connectToken(){
+  const token=$('operator-token').value.trim();if(!token)return;
+  operatorToken=token;$('operator-token').value='';approvals=null;approvalsFingerprint='';decisionMessage='';renderApprovals();pollApprovals();
+}
+$('token-connect').addEventListener('click',connectToken);
+$('operator-token').addEventListener('keydown',e=>{if(e.key==='Enter')connectToken();});
+$('token-forget').addEventListener('click',()=>{operatorToken=null;approvals=null;approvalsFingerprint='';decisionMessage='';renderApprovals();});
+$('filter').addEventListener('change',renderRows);$('search').addEventListener('input',renderRows);document.addEventListener('visibilitychange',()=>{if(document.hidden)clearUnknown('Polling paused while this page is hidden.');else{poll();pollApprovals();}});renderApprovals();poll();setInterval(poll,10000);setInterval(pollApprovals,10000);

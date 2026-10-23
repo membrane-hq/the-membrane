@@ -1,9 +1,11 @@
 # Local operator audit dashboard
 
-This is an observational surface, not another way to operate the gate. The
-`membrane-dashboard` binary is a separate Rust/Axum process with no signing keys,
-connector credentials, policy editor, or write endpoints. Static assets are bundled;
-no CDN, framework build, external fonts or analytics are used.
+This is an observational surface with exactly one operation: deciding held
+approval calls. The `membrane-dashboard` binary is a separate Rust/Axum process with
+no signing keys, connector credentials or policy editor. It stores no operator token:
+the approvals view relays the token the operator pastes into the page to the gate
+with each request, and the gate authenticates and receipts every decision. Static
+assets are bundled; no CDN, framework build, external fonts or analytics are used.
 
 ## Run
 
@@ -27,8 +29,18 @@ cargo run -p membrane-dashboard
 cargo run -p membrane-dashboard -- --listen 127.0.0.1:8791 --audit-url http://127.0.0.1:8788
 ```
 
+The approvals view talks to the production gate router, default
+`http://127.0.0.1:8787`; change it with `--gate-url`. Like the audit upstream, the
+gate URL must be a plain loopback HTTP base URL.
+
 ## What the page means
 
+- **Approvals**: held calls waiting for a human decision, newest first, with the
+  caller identity, scope, expiry and the exact held request payload. A pending hold
+  takes an optional receipt note and a two-step approve or reject. Decided, consumed
+  and expired holds stay visible with the decider's OIDC subject. When approval gates
+  are not configured on the gate, the panel says so instead of showing an empty list.
+  The caller still retries after approval; the dashboard does not execute anything.
 - **Decision log**: newest 500 authorization decisions in the running gate process,
   allow/deny, stable matched rule code, UTC Unix timestamp displayed in browser local
   time, action class, signing gate identity and verified scope when available.
@@ -63,9 +75,21 @@ Both listeners only accept loopback IP bind addresses, reject foreign Host/Origi
 headers and send no CORS permission. The dashboard uses only GET requests to the
 audit source, refuses redirects, bypasses proxies and bounds response size/time.
 Assets have a same-origin CSP, no-store and nosniff headers. DOM content uses
-`textContent`, never interpreted HTML. There is no connection to gate write routes.
-Local users/processes are inside this trust boundary; loopback is not authentication.
-Use OS account isolation for multi-user hosts. Do not forward either port publicly.
+`textContent`, never interpreted HTML.
+
+The approval decision route is the single write path. It accepts a POST only from
+this page on this machine: the Host must be a literal loopback address, the Origin
+must match it exactly and fetch metadata must not mark the request cross-site. The
+dashboard validates the approval id and decision shape, then forwards the operator's
+bearer token to the gate's `/v1/approvals` routes. The gate re-authenticates the
+operator on every call, publishes the signed decision receipt before the decision
+takes effect, and the approval store applies it exactly once. The token lives in the
+page's memory; reloading or "Forget token" discards it, and it is never written to
+disk, localStorage or the audit log.
+
+Local users/processes are inside this trust boundary; loopback is not authentication
+for reads. For decisions, the gate's OIDC operator token is the authentication. Use
+OS account isolation for multi-user hosts. Do not forward either port publicly.
 
 This bounded memory log is not durable, cryptographically signed, complete historical
 SIEM export, or a substitute for the chained bus receipts. It resets on gate restart.

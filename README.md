@@ -12,7 +12,7 @@ Self-host the gate and hold your own keys. The Membrane checks authorization bef
 
 ## Software and demo
 
-The Rust workspace includes the authorization gate, CLI, receipt and attestation components, read-only operator dashboard, and deterministic recommendation advisor. The gate authenticates callers through caller-bound signed IACs and request proofs; operator-owned identity grants limit access and support revocation.
+The Rust workspace includes the authorization gate, CLI, receipt and attestation components, operator dashboard, and deterministic recommendation advisor. The gate authenticates callers through caller-bound signed IACs and request proofs; operator-owned identity grants limit access and support revocation.
 
 The repo also includes a demo of the operator workflow: authorization checks and receipt chaining. It uses ephemeral keys and an in-memory bus, and tool effects are simulated.
 
@@ -226,11 +226,13 @@ The workspace includes the gate, caller-bound IACs and identity grants, CP recei
 
 Zorie R. Barber
 
-## Local operator audit
+## Local operator console
 
-A separate read-only Rust dashboard observes the running gate: authorization decisions,
-matched rules, liveness, loaded registry policy and deny rate. Loopback only, no policy
-editor or gate write path. See [local run instructions and limits](docs/operator-dashboard.md).
+A separate Rust dashboard observes the running gate: authorization decisions, matched
+rules, liveness, loaded registry policy and deny rate. Its approvals view lists held
+calls and lets an operator approve or reject them with an OIDC operator token, which
+the dashboard relays to the gate per request and never stores. Loopback only, no
+policy editor and no other write path. See [local run instructions and limits](docs/operator-dashboard.md).
 
 Operator IdP integration: [OIDC configuration and token exchange](docs/operator-oidc.md).
 
