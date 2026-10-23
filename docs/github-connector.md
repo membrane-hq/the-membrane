@@ -20,7 +20,7 @@ not receive operator GitHub tokens.
 | Name | Purpose |
 | --- | --- |
 | `MEMBRANE_GITHUB_TOKEN_FILE` | Path to a file holding the token (mode 0600). Preferred: the value never sits in the process environment or on a command line |
-| `MEMBRANE_GITHUB_TOKEN` or `GITHUB_TOKEN` | Fallback. Fine-grained or classic token, never commit. Removed from the gate process environment after it is read |
+| `MEMBRANE_GITHUB_TOKEN` or `GITHUB_TOKEN` | Fallback. Fine-grained or classic token, never commit. The environment copy stays visible to the process and to `/proc/<pid>/environ`, so prefer the file |
 | `github_repo_allowlist` in channel registry | Explicit `owner/name` list; empty denies all |
 
 Suggested token scopes: classic `repo`, or fine-grained **Issues: Read and write**
@@ -38,10 +38,19 @@ request chooses which credential is used.
   header is built.
 - A configured token file must not be readable by group or others, and a set
   but unusable file stops startup. It never falls back to the environment.
-- The token is attached only to an `https` API base, or to loopback for local
-  tests. Any other destination is refused before a request is built.
+- The API base is fixed to `https://api.github.com` in production; no
+  environment variable or registry field changes it. As a second check, the
+  token is attached only to that host, or to loopback for local tests, and the
+  HTTP client does not follow redirects, so a redirect cannot carry the token to
+  another host.
 - If GitHub echoes the token in an error body, the exact value is removed
   before the error reaches the caller, the receipt or the logs.
+
+Limits: this is local hardening of one connector, not an encrypted delivery
+channel. The request library copies the token into its header value, which is
+not zeroed, and the environment fallback leaves a copy in process memory and
+`/proc/<pid>/environ`. A host-level attacker on the gate machine can still read
+the token.
 
 This follows the pattern in
 [Bitwarden Agent Access](https://github.com/bitwarden/agent-access) and

@@ -39,7 +39,7 @@ pub enum GitHubConnectorError {
     InvalidArgs(String),
     #[error("GitHub API error ({status}): {message}")]
     Api { status: u16, message: String },
-    #[error("refusing to send the GitHub token to {0}: https or loopback required")]
+    #[error("refusing to send the GitHub token to {0}: only https://api.github.com or loopback")]
     CredentialDestination(String),
     #[error("HTTP client error: {0}")]
     Http(String),
@@ -82,8 +82,10 @@ impl GitHubConnectorConfig {
         })
     }
 
-    /// The token is only attached to requests for an https API base, or a
-    /// loopback address for local tests.
+    /// The token is attached only to `https://api.github.com`, or to a
+    /// loopback address for local tests. Production never sets another base
+    /// (`from_env` fixes it), so this guards against a future code path or
+    /// config option pointing the credential at another host.
     pub fn check_token_destination(&self) -> Result<(), GitHubConnectorError> {
         let denied = || GitHubConnectorError::CredentialDestination(self.api_base.clone());
         let url = reqwest::Url::parse(&self.api_base).map_err(|_| denied())?;
@@ -96,7 +98,7 @@ impl GitHubConnectorConfig {
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback());
         match url.scheme() {
-            "https" => Ok(()),
+            "https" if host == "api.github.com" && url.port().is_none() => Ok(()),
             "http" if loopback => Ok(()),
             _ => Err(denied()),
         }
@@ -703,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn token_is_only_sent_to_https_or_loopback() {
+    fn token_is_only_sent_to_api_github_com_or_loopback() {
         let mut config = cfg(&["acme/allowed"]);
         for ok in [
             "https://api.github.com",

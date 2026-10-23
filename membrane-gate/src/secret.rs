@@ -80,23 +80,17 @@ impl Secret {
     }
 
     /// Load from `file_var` (a path) first, then from the first non-empty
-    /// variable in `env_vars`. Every variable in `env_vars` is removed from the
-    /// process environment, whether or not it was used. A set but unusable
-    /// file is an error; it never falls back to the environment.
+    /// variable in `env_vars`. A set but unusable file is an error; it never
+    /// falls back to the environment.
     pub fn load(file_var: &str, env_vars: &[&str]) -> Result<Option<Self>, SecretError> {
         let from_file = std::env::var(file_var)
             .ok()
             .filter(|p| !p.is_empty())
             .map(|path| Self::from_file(Path::new(&path)));
-        let mut from_env = None;
-        for name in env_vars {
-            if let Some(value) = std::env::var(name).ok().filter(|s| !s.is_empty()) {
-                if from_env.is_none() {
-                    from_env = Some(Self::new(value));
-                }
-            }
-            std::env::remove_var(name);
-        }
+        let from_env = env_vars
+            .iter()
+            .find_map(|name| std::env::var(name).ok().filter(|s| !s.is_empty()))
+            .map(Self::new);
         match from_file {
             Some(result) => result.map(Some),
             None => Ok(from_env),
@@ -174,7 +168,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn load_prefers_file_and_clears_env() {
+    fn load_prefers_file_over_env() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("membrane-secret-load-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -190,7 +184,6 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(s.expose(), "from-file");
-        assert!(std::env::var("MEMBRANE_TEST_SECRET_ENV_A").is_err());
 
         // A set but unusable file fails closed instead of using the env value.
         std::env::set_var("MEMBRANE_TEST_SECRET_FILE_B", dir.join("missing"));
@@ -200,12 +193,11 @@ mod tests {
             &["MEMBRANE_TEST_SECRET_ENV_B"]
         )
         .is_err());
-        assert!(std::env::var("MEMBRANE_TEST_SECRET_ENV_B").is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn load_reads_env_then_removes_it() {
+    fn load_reads_env_fallback() {
         std::env::set_var("MEMBRANE_TEST_SECRET_ENV_C", SYNTHETIC);
         let s = Secret::load(
             "MEMBRANE_TEST_SECRET_FILE_C",
@@ -214,10 +206,9 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(s.expose(), SYNTHETIC);
-        assert!(std::env::var("MEMBRANE_TEST_SECRET_ENV_C").is_err());
         assert!(Secret::load(
             "MEMBRANE_TEST_SECRET_FILE_C",
-            &["MEMBRANE_TEST_SECRET_ENV_C"]
+            &["MEMBRANE_TEST_SECRET_NONE"]
         )
         .unwrap()
         .is_none());
