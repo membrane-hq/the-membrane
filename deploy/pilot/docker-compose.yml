@@ -1,0 +1,64 @@
+name: membrane-pilot
+
+# Pilot: published gate image plus a local example model backend.
+# Prereq: a registry and IAC for the caller, generated with the CLI
+# (docs/quickstart.md, steps 1-3). Copy them into this directory as
+# registry.yaml, iac.json and operator.nsec (mode 0600; the signing key
+# loads from the file, never the environment).
+
+services:
+  llama:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    restart: unless-stopped
+    volumes:
+      - llama-models:/models:ro
+    command:
+      - -m
+      - /models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8080"
+      - --threads
+      - "4"
+      - --ctx-size
+      - "2048"
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+
+  gate:
+    image: ghcr.io/membrane-hq/the-membrane/membrane-gate:edge
+    restart: unless-stopped
+    depends_on:
+      - llama
+    environment:
+      MEMBRANE_OPERATION_DIR: /state/tool-operations
+      MEMBRANE_RELAY_URL: ${MEMBRANE_RELAY_URL:-ws://host.docker.internal:7778}
+      NOSTR_NSEC_FILE: /config/operator.nsec
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./registry.yaml:/config/registry.yaml:ro
+      - ./iac.json:/config/iac.json:ro
+      - ./operator.nsec:/config/operator.nsec:ro
+      - gate-state:/state
+    ports:
+      - "127.0.0.1:8787:8787"
+    command:
+      - gate
+      - start
+      - --listen
+      - "0.0.0.0:8787"
+      - --registry
+      - /config/registry.yaml
+      - --iac
+      - /config/iac.json
+      - --relay
+      - ${MEMBRANE_RELAY_URL:-ws://host.docker.internal:7778}
+
+volumes:
+  gate-state:
+  llama-models:
+    name: membrane-pilot-llama-models
