@@ -20,6 +20,10 @@ jobs:
       - run: cargo test --workspace --all-features --locked
       - run: cargo check -p membrane-cli --no-default-features --features ots --locked
       - run: cargo check -p membrane-cli --no-default-features --features demo --locked
+      - name: Validate checked-in channel registries
+        run: |
+          cargo run --locked -q -p membrane-cli -- registry validate tools/channel-registry.example.yaml
+          cargo run --locked -q -p membrane-cli -- registry validate deploy/gate/channel-registry.prod.yaml
   containers:
     runs-on: ubuntu-latest
     strategy:
