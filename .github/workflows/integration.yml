@@ -1,0 +1,125 @@
+name: Pilot integration (disposable)
+# Manual, disposable end-to-end check of the pilot compose stack on a
+# GitHub-hosted runner (free for this public repo on standard runners).
+# No user host, no credentials, no publishing: keys are generated in the
+# runner and discarded; images are built locally and never pushed.
+# Stub mode exercises the authorization path ONLY (mock model replies) -
+# a green stub run says nothing about real model serving. Real mode
+# downloads the 0.5B GGUF from Hugging Face and tests through the model.
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'stub (auth path only) or real (downloads the 0.5B GGUF)'
+        required: true
+        default: 'stub'
+        type: choice
+        options: ['stub', 'real']
+permissions:
+  contents: read
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build CLI and helper
+        run: cargo build --locked -p membrane-cli --bin membrane --example operator-request
+      - name: Build gate image locally (as the compose file expects)
+        run: docker build -f deploy/gate/Dockerfile -t ghcr.io/membrane-hq/the-membrane/membrane-gate:edge .
+      - name: Generate ephemeral keys and grant
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          cargo run --locked -q -p membrane-cli --example operator-request -- setup "$RUNNER_TEMP/pilot"
+          sed -i 's#http://127.0.0.1:8080#http://llama:8080#' "$RUNNER_TEMP/pilot/registry.yaml"
+          export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/operator.nsec"
+          membrane iac issue --caller-pubkey "$(jq -r .caller_pubkey "$RUNNER_TEMP/pilot/keys.json")" \
+            --scope-id pilot-scope --model sha256:demo-model --ttl-secs 900 --out "$RUNNER_TEMP/pilot/iac.json"
+          mkdir -p deploy/pilot/config
+          cp "$RUNNER_TEMP/pilot/registry.yaml" "$RUNNER_TEMP/pilot/iac.json" "$RUNNER_TEMP/pilot/operator.nsec" deploy/pilot/config/
+          chmod 600 deploy/pilot/config/operator.nsec
+      - name: Start local throwaway relay
+        run: docker run --rm -d --name membrane-relay -p 127.0.0.1:7778:8080 scsibug/nostr-rs-relay:0.10.0
+      - name: Fetch model (real mode)
+        if: inputs.model == 'real'
+        run: |
+          docker volume create membrane-pilot-llama-models
+          docker run --rm -v membrane-pilot-llama-models:/models curlimages/curl:8 \
+            -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+            https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+      - name: Stub override (stub mode replaces the model service, enables mock replies)
+        if: inputs.model == 'stub'
+        run: |
+          printf '%s\n' \
+            'services:' \
+            '  llama:' \
+            '    image: alpine' \
+            '    entrypoint: ["sh", "-c", "sleep infinity"]' \
+            '    command: []' \
+            '    volumes: []' \
+            '    deploy: {}' \
+            '  gate:' \
+            '    environment:' \
+            '      MEMBRANE_DEV_MOCK_MODEL: "1"' \
+            > deploy/pilot/docker-compose.stub.yml
+      - name: Start the pilot stack
+        run: |
+          cd deploy/pilot
+          EXTRA=""
+          [ "${{ inputs.model }}" = "stub" ] && EXTRA="-f docker-compose.stub.yml"
+          MEMBRANE_RELAY_URL=ws://host.docker.internal:7778 docker compose -f docker-compose.yml $EXTRA up -d
+      - name: Wait for gate readiness (status ok, journal healthy)
+        run: |
+          # /health returns 200 with a status field: ok|degraded, covering
+          # journal availability, journal dispatch blockage and router
+          # staleness. Fresh-boot semantics verified in code: router staleness
+          # is false before any router CP exists (session.rs), and a fresh
+          # operation dir has no unresolved operations, so a healthy pilot
+          # boot reaches status=ok. Gate on that; fail explicitly otherwise.
+          body=""; ready=""
+          for i in $(seq 1 90); do
+            body=$(curl -fsS http://127.0.0.1:8787/health 2>/dev/null) &&               [ "$(echo "$body" | jq -r .status)" = "ok" ] && { ready=1; break; }
+            sleep 2
+          done
+          echo "$body" | jq '{status, journal_available, journal_dispatch_blocked, router_stale, unresolved_operations}' || true
+          [ "$ready" = 1 ] || { echo "FAIL: gate never reported status=ok"; exit 1; }
+      - name: Authorized call returns 200, replay returns 403
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/caller.nsec"
+          echo '{"model":"sha256:demo-model","messages":[{"role":"user","content":"hi"}],"stream":false}' > "$RUNNER_TEMP/pilot/chat.json"
+          cargo run --locked -q -p membrane-cli --example operator-request -- sign \
+            http://127.0.0.1:8787 "$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")" \
+            "$RUNNER_TEMP/pilot/iac.json" /v1/chat/completions "$RUNNER_TEMP/pilot/chat.json" "$RUNNER_TEMP/pilot/request"
+          send() { curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/v1/chat/completions \
+            --header @"$RUNNER_TEMP/pilot/request/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request/body.json"; }
+          first=$(send); second=$(send)
+          echo "first=$first second=$second"
+          [ "$first" = 200 ] && [ "$second" = 403 ]
+      - name: Revoked caller is refused; evidence exports
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          cd deploy/pilot
+          # Single-file bind mounts keep the original inode, so rewrite the
+          # registry in place (the gate re-reads it per authorization check).
+          sed -i 's/revoked: false/revoked: true/' registry.yaml
+          export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/caller.nsec"
+          cargo run --locked -q -p membrane-cli --example operator-request -- sign             http://127.0.0.1:8787 "$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")"             "$RUNNER_TEMP/pilot/iac.json" /v1/chat/completions "$RUNNER_TEMP/pilot/chat.json" "$RUNNER_TEMP/pilot/request2"
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/v1/chat/completions \
+            --header @"$RUNNER_TEMP/pilot/request2/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request2/body.json")
+          echo "post-revocation=$code"; [ "$code" = 403 ]
+          MEMBRANE_RELAY_URL=ws://127.0.0.1:7778 membrane evidence export --format jsonl --since-secs 3600 --out "$RUNNER_TEMP/evidence.jsonl"
+          lines=$(wc -l < "$RUNNER_TEMP/evidence.jsonl"); echo "evidence_lines=$lines"; [ "$lines" -ge 1 ]
+      - name: Collect logs on failure
+        if: failure()
+        # Redact bech32 secret keys (nsec1...) defensively; key material is
+        # never logged by the gate, but logs leave the runner only redacted.
+        run: |
+          cd deploy/pilot
+          docker compose logs --no-color 2>&1 | sed -E 's/nsec1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+/[REDACTED]/g' > "$RUNNER_TEMP/pilot-logs.txt" || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: pilot-logs
+          path: ${{ runner.temp }}/pilot-logs.txt
+          retention-days: 7
