@@ -96,15 +96,31 @@ jobs:
           first=$(send); second=$(send)
           echo "first=$first second=$second"
           [ "$first" = 200 ] && [ "$second" = 403 ]
-      - name: Revoked caller is refused; evidence exports
+      - name: Invalid candidate registry is refused, live config unchanged
         run: |
           export PATH="$PWD/target/debug:$PATH"
           cd deploy/pilot
-          # Single-file bind mounts keep the original inode, so rewrite the
-          # registry in place (the gate re-reads it per authorization check).
-          sed -i 's/revoked: false/revoked: true/' registry.yaml
+          printf '{{{ not a registry\n' > "$RUNNER_TEMP/pilot/bad.yaml"
+          if membrane registry validate "$RUNNER_TEMP/pilot/bad.yaml"; then
+            echo "FAIL: invalid registry validated"; exit 1
+          fi
+          if membrane registry apply "$RUNNER_TEMP/pilot/bad.yaml" --to config/registry.yaml; then
+            echo "FAIL: invalid registry applied"; exit 1
+          fi
+          grep -q 'revoked: false' config/registry.yaml || { echo "FAIL: live registry changed by refused apply"; exit 1; }
+      - name: Policy change via shipped apply - revoked caller is refused; evidence exports
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          cd deploy/pilot
+          cp config/registry.yaml "$RUNNER_TEMP/pilot/revoke.yaml"
+          sed -i 's/revoked: false/revoked: true/' "$RUNNER_TEMP/pilot/revoke.yaml"
+          membrane registry validate "$RUNNER_TEMP/pilot/revoke.yaml"
+          membrane registry diff config/registry.yaml "$RUNNER_TEMP/pilot/revoke.yaml"
+          membrane registry apply "$RUNNER_TEMP/pilot/revoke.yaml" --to config/registry.yaml
           export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/caller.nsec"
-          cargo run --locked -q -p membrane-cli --example operator-request -- sign             http://127.0.0.1:8787 "$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")"             "$RUNNER_TEMP/pilot/iac.json" /v1/chat/completions "$RUNNER_TEMP/pilot/chat.json" "$RUNNER_TEMP/pilot/request2"
+          cargo run --locked -q -p membrane-cli --example operator-request -- sign \
+            http://127.0.0.1:8787 "$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")" \
+            "$RUNNER_TEMP/pilot/iac.json" /v1/chat/completions "$RUNNER_TEMP/pilot/chat.json" "$RUNNER_TEMP/pilot/request2"
           code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/v1/chat/completions \
             --header @"$RUNNER_TEMP/pilot/request2/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request2/body.json")
           echo "post-revocation=$code"; [ "$code" = 403 ]
