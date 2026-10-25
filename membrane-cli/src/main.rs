@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +18,9 @@ use membrane_core::{
 use membrane_core::{
     build_rollup_bundle, day_bounds_utc, validate_rollup_bundle, HttpOtsStamper, MockOtsStamper,
     OtsStamper, RollupBundle, SignedRollupBundle,
+};
+use membrane_gate::policy::{
+    diff_registries, install_registry, validate_registry_text, ValidationReport,
 };
 #[cfg(feature = "demo")]
 use membrane_gate::{demo_registry, run_demo_dashboard, DemoRuntime, DemoServerState};
@@ -105,6 +108,11 @@ enum Commands {
         #[arg(long)]
         scope_id: Option<String>,
     },
+    /// Channel registry policy operations (validate, diff, apply)
+    Registry {
+        #[command(subcommand)]
+        command: RegistryCommands,
+    },
     /// Write default config to ~/.config/membrane/config.yaml
     Init,
     /// Launch the local interactive dashboard (no secrets or relay required)
@@ -172,6 +180,39 @@ enum GateCommands {
         iac: PathBuf,
         #[arg(long, default_value = "127.0.0.1:8787")]
         listen: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryCommands {
+    /// Validate a channel registry offline; exits non-zero on errors
+    Validate {
+        /// Registry file to validate
+        file: PathBuf,
+        /// Emit the report as JSON
+        #[arg(long)]
+        json: bool,
+        /// Treat warnings as errors
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Show the changes between two channel registries
+    Diff {
+        /// Registry file currently in force
+        old: PathBuf,
+        /// Candidate registry file
+        new: PathBuf,
+        /// Emit the diff as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate a candidate registry and atomically install it over the live file
+    Apply {
+        /// Candidate registry file
+        candidate: PathBuf,
+        /// Live registry file the gate reads
+        #[arg(long)]
+        to: PathBuf,
     },
 }
 
@@ -585,6 +626,13 @@ async fn main() -> Result<()> {
             relay_url,
             scope_id,
         } => run_sever(nsec, relay_url, scope_id).await,
+        Commands::Registry { command } => match command {
+            RegistryCommands::Validate { file, json, strict } => {
+                registry_validate(&file, json, strict)
+            }
+            RegistryCommands::Diff { old, new, json } => registry_diff(&old, &new, json),
+            RegistryCommands::Apply { candidate, to } => registry_apply(&candidate, &to),
+        },
         Commands::Init => run_init(),
     }
 }
@@ -1477,6 +1525,91 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("clock")
         .as_secs() as i64
+}
+
+fn registry_validate(file: &Path, json: bool, strict: bool) -> Result<()> {
+    let text = std::fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
+    let (_, report) = validate_registry_text(&text);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_validation_report(&report);
+    }
+    if !report.is_valid() {
+        bail!(
+            "{} is not a valid registry ({} error(s))",
+            file.display(),
+            report.errors.len()
+        );
+    }
+    if strict && !report.warnings.is_empty() {
+        bail!(
+            "{} has {} warning(s) and --strict is set",
+            file.display(),
+            report.warnings.len()
+        );
+    }
+    if !json {
+        println!("{}: valid", file.display());
+    }
+    Ok(())
+}
+
+fn registry_diff(old: &Path, new: &Path, json: bool) -> Result<()> {
+    let old_text =
+        std::fs::read_to_string(old).with_context(|| format!("read {}", old.display()))?;
+    let new_text =
+        std::fs::read_to_string(new).with_context(|| format!("read {}", new.display()))?;
+    let (old_registry, old_report) = validate_registry_text(&old_text);
+    let (new_registry, new_report) = validate_registry_text(&new_text);
+    let (Some(old_registry), Some(new_registry)) = (old_registry, new_registry) else {
+        eprintln!("{}:", old.display());
+        print_validation_report(&old_report);
+        eprintln!("{}:", new.display());
+        print_validation_report(&new_report);
+        bail!("cannot diff: one of the registries does not parse");
+    };
+    if !new_report.is_valid() {
+        eprintln!(
+            "note: {} has {} validation error(s); run `membrane registry validate`",
+            new.display(),
+            new_report.errors.len()
+        );
+    }
+    let diff = diff_registries(&old_registry, &new_registry);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&diff)?);
+    } else {
+        println!("{}", diff.render_text());
+    }
+    Ok(())
+}
+
+fn registry_apply(candidate: &Path, to: &Path) -> Result<()> {
+    let report = install_registry(candidate, to)?;
+    print_validation_report(&report);
+    if !report.is_valid() {
+        bail!(
+            "refused to install {} over {} ({} error(s)); the live registry is unchanged",
+            candidate.display(),
+            to.display(),
+            report.errors.len()
+        );
+    }
+    println!("installed {} -> {}", candidate.display(), to.display());
+    Ok(())
+}
+
+fn print_validation_report(report: &ValidationReport) {
+    for error in &report.errors {
+        println!("error: {error}");
+    }
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
+    if report.errors.is_empty() && report.warnings.is_empty() {
+        println!("no issues found");
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 pub mod oidc;
 pub mod operations;
+pub mod policy;
 use membrane_core::event::{EventType, MembraneEvent, MembranePayload, RouterSessionPayload};
 use membrane_core::iac::IntentAuthorizationCredential;
 use membrane_core::merkle::{Domain, MerkleTree};
