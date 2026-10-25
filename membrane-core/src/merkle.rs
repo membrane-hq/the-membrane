@@ -125,3 +125,120 @@ mod tests {
         assert_eq!(unsorted.root(), sorted.root());
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn leaf_vec(max_len: usize) -> impl Strategy<Value = Vec<Vec<u8>>> {
+        proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..64), 0..max_len)
+    }
+
+    proptest! {
+        /// Set trees are permutation-invariant: the root commits to the set of
+        /// leaves, not their arrival order. This is intended behavior (spec
+        /// §5.1 sorts leaves before pairing).
+        #[test]
+        fn set_tree_root_is_permutation_invariant(raw in leaf_vec(12)) {
+            let leaves: Vec<[u8; 32]> = raw
+                .iter()
+                .map(|l| prefixed_hash(Domain::BusEvent, l))
+                .collect();
+            let mut shuffled = leaves.clone();
+            shuffled.reverse();
+            prop_assert_eq!(
+                MerkleTree::from_prefixed_leaves(leaves).root(),
+                MerkleTree::from_prefixed_leaves(shuffled).root()
+            );
+        }
+
+        /// Empty set trees have no root; a single-leaf tree's root is the leaf.
+        #[test]
+        fn set_tree_root_edge_cases(raw in leaf_vec(12)) {
+            let leaves: Vec<[u8; 32]> = raw
+                .iter()
+                .map(|l| prefixed_hash(Domain::BusEvent, l))
+                .collect();
+            let tree = MerkleTree::from_prefixed_leaves(leaves.clone());
+            prop_assert_eq!(tree.root().is_some(), !leaves.is_empty());
+            prop_assert_eq!(tree.leaf_count(), leaves.len());
+            if leaves.len() == 1 {
+                prop_assert_eq!(tree.root(), Some(leaves[0]));
+            }
+        }
+
+        /// Distinct leaf sets differing in exactly one element commit to
+        /// different roots.
+        #[test]
+        fn set_tree_root_changes_with_any_leaf(raw in leaf_vec(12), extra in any::<Vec<u8>>()) {
+            let mut leaves: Vec<[u8; 32]> = raw
+                .iter()
+                .map(|l| prefixed_hash(Domain::BusEvent, l))
+                .collect();
+            let extra_leaf = prefixed_hash(Domain::BusEvent, &extra);
+            prop_assume!(!leaves.contains(&extra_leaf));
+            let base = MerkleTree::from_prefixed_leaves(leaves.clone()).root();
+            if leaves.is_empty() {
+                leaves.push(extra_leaf);
+            } else {
+                leaves[0] = extra_leaf;
+            }
+            prop_assert_ne!(base, MerkleTree::from_prefixed_leaves(leaves).root());
+        }
+
+        /// KNOWN LIMITATION, issue #62: an odd leaf count duplicates the last
+        /// leaf, so a root does not commit to the exact leaf count -
+        /// [a, b, c] and [a, b, c, c] collide. Spec §5.1 documents this
+        /// construction. This test pins the current behavior so the eventual
+        /// fix changes it deliberately, not silently. It is not an
+        /// endorsement of the behavior.
+        #[test]
+        fn known_limitation_odd_leaf_duplication_preserves_root(raw in leaf_vec(12)) {
+            let leaves: Vec<[u8; 32]> = raw
+                .iter()
+                .map(|l| prefixed_hash(Domain::BusEvent, l))
+                .collect();
+            prop_assume!(leaves.len() >= 3 && leaves.len() % 2 == 1);
+            // The tree sorts leaves, so the duplicated "last" leaf is the
+            // maximum digest, not the last element before sorting.
+            let max_leaf = *leaves.iter().max().unwrap();
+            let mut padded = leaves.clone();
+            padded.push(max_leaf);
+            prop_assert_eq!(
+                MerkleTree::from_prefixed_leaves(leaves).root(),
+                MerkleTree::from_prefixed_leaves(padded).root()
+            );
+        }
+
+        /// Domain prefixes separate trees: the same bytes hash differently
+        /// under every domain.
+        #[test]
+        fn domain_prefixes_separate(data in any::<Vec<u8>>()) {
+            let hashes = [
+                prefixed_hash(Domain::FeatureChunk, &data),
+                prefixed_hash(Domain::BusEvent, &data),
+                prefixed_hash(Domain::CpHash, &data),
+                prefixed_hash(Domain::WitnessKey, &data),
+            ];
+            for (i, a) in hashes.iter().enumerate() {
+                for b in &hashes[i + 1..] {
+                    prop_assert_ne!(a, b);
+                }
+            }
+        }
+
+        /// Ordered (domain-leaf) trees are deterministic and preserve leaf
+        /// count. Note: order is only committed across pairs - the pair-sorted
+        /// parent hash makes within-pair swaps invisible (see issue #62), so
+        /// no order-sensitivity property is asserted here.
+        #[test]
+        fn ordered_tree_is_deterministic(raw in leaf_vec(12)) {
+            let first = MerkleTree::from_domain_leaves(Domain::FeatureChunk, &raw);
+            let second = MerkleTree::from_domain_leaves(Domain::FeatureChunk, &raw);
+            prop_assert_eq!(first.root(), second.root());
+            prop_assert_eq!(first.leaf_count(), raw.len());
+            prop_assert_eq!(first.root().is_some(), !raw.is_empty());
+        }
+    }
+}
