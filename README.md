@@ -27,6 +27,7 @@ The repo also includes a demo of the operator workflow: authorization checks and
 |------|-------------|
 | [docs/product.md](docs/product.md) | Product overview and deployment |
 | [docs/approval-gates.md](docs/approval-gates.md) | Holding out-of-scope tool calls for operator approval |
+| [docs/policy-as-code.md](docs/policy-as-code.md) | Channel registry as code: validate, diff, apply |
 | [docs/reference-stack.md](docs/reference-stack.md) | Self-hosted deployment with local models, including air-gapped operation |
 | [docs/siem-export.md](docs/siem-export.md) | Vendor-neutral SIEM/SOC export (JSON Lines and OCSF-inspired JSON) |
 | [docs/github-connector.md](docs/github-connector.md) | GitHub connector configuration |

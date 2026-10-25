@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Membrane channel registry",
+  "description": "Operator policy for the Membrane gate: identity grants, allowlists and approval gates. Validate semantically with `membrane registry validate`; this schema covers shape only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "permitted_channels",
+    "forbidden_exports",
+    "model_allowlist"
+  ],
+  "properties": {
+    "identities": {
+      "type": "object",
+      "description": "Caller public keys (64 lowercase hex) mapped to identity grants. Empty denies every production caller.",
+      "propertyNames": {
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/identityGrant"
+      }
+    },
+    "permitted_channels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "forbidden_exports": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "model_allowlist": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "delta_t_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 300
+    },
+    "model_api_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^https?://",
+      "description": "Model API base URL (chat/completions wire format). Aliases: llama_cpp_url, ollama_url."
+    },
+    "llama_cpp_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^https?://"
+    },
+    "ollama_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^https?://"
+    },
+    "github_repo_allowlist": {
+      "type": "array",
+      "description": "Explicit `owner/name` repos the GitHub connector may touch. Empty denies all repos.",
+      "items": {
+        "type": "string",
+        "pattern": "^[^/\\s]+/[^/\\s]+$"
+      }
+    },
+    "approval": {
+      "description": "Approval gates. Absent means out-of-scope tool calls are blocked, never held.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/approvalPolicy"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "identityGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "revoked": {
+          "type": "boolean",
+          "default": false
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "permitted_channels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "model_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "tool_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "github_repo_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^/\\s]+/[^/\\s]+$"
+          }
+        },
+        "not_before": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Unix seconds. The grant is not usable before this time."
+        },
+        "expires_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Unix seconds. The grant stops working at this time (exclusive). Set expires_at or valid_for, not both."
+        },
+        "valid_for": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+[smhd]$",
+          "description": "Window length counted from not_before: a number followed by s, m, h or d. Requires not_before and excludes expires_at."
+        },
+        "spend": {
+          "description": "Spend authority on the Routstr rail. Absent means this identity cannot spend.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/spendGrant"
+            }
+          ]
+        }
+      }
+    },
+    "spendGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "budget",
+        "budget_cap_msat",
+        "per_call_ceiling_msat"
+      ],
+      "properties": {
+        "budget": {
+          "type": "string",
+          "minLength": 1
+        },
+        "budget_cap_msat": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "per_call_ceiling_msat": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "approvalPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "holdable_tools": {
+          "type": "array",
+          "description": "Tools that may be held for operator approval. Any other out-of-scope tool is blocked.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "ttl_secs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400,
+          "default": 900,
+          "description": "Seconds a hold stays open, and seconds an approval stays usable."
+        }
+      }
+    }
+  }
+}
