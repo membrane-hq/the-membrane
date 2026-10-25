@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
                 "model_api_url": "http://127.0.0.1:8080",
                 "github_repo_allowlist": repos,
                 "identities": { caller.public_key().to_hex(): {
+                    "revoked": false,
                     "scopes": ["pilot-scope"], "permitted_channels": ["local-llm"],
                     "model_allowlist": ["sha256:demo-model"],
                     "tool_allowlist": ["github.comment", "github.issue.read"],
