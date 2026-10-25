@@ -23,13 +23,13 @@ jobs:
         image: ${{ (github.event_name == 'workflow_dispatch' && inputs.images == 'gate') && fromJSON('["gate"]') || fromJSON('["gate", "demo", "rollup"]') }}
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}/membrane-${{ matrix.image }}
@@ -38,7 +38,7 @@ jobs:
             type=sha,prefix=sha-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/${{ matrix.image }}/Dockerfile
