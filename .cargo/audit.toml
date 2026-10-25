@@ -1,6 +1,4 @@
 [advisories]
-# RUSTSEC-2023-0071 (rsa, Marvin timing attack): no fixed release exists. The rsa crate
-# arrives through jsonwebtoken and is used only to verify RS256 operator tokens. The gate
-# performs no RSA private-key operations, which is what the advisory concerns.
-# Revisit when a fixed rsa release or a jsonwebtoken alternative is available.
-ignore = ["RUSTSEC-2023-0071"]
+# No current exceptions. RUSTSEC-2023-0071 (rsa) became moot when the gate moved
+# jsonwebtoken to the aws-lc-rs backend, which removes rsa from the dependency tree.
+ignore = []
