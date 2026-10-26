@@ -7,7 +7,8 @@ name: Pilot integration (disposable)
 # a green stub run says nothing about real model serving. Real mode
 # downloads the 0.5B GGUF from Hugging Face and tests through the model.
 # Every green run ends by writing, signing, and verifying a run manifest
-# over the evidence bundle; the bundle itself stays on the disposable runner.
+# over the evidence bundle; only a gpg-encrypted copy of the bundle leaves
+# the runner, as ciphertext, for private archive.
 on:
   workflow_dispatch:
     inputs:
@@ -271,10 +272,28 @@ jobs:
           mv "$B/run-manifest.signed.json" "$B/run-manifest.json"
           cargo run --locked -q -p membrane-cli --example run-manifest -- verify \
             --manifest "$B/run-manifest.json" --bundle "$B" --signer-pubkey "$operator_pubkey"
-          # The signed bundle stays on the disposable runner for now: where
-          # durable bundles may live is a separate decision. The hash below
+          # The signed bundle stays on the disposable runner; the hash below
           # binds this run's log to the verified manifest.
           sha256sum "$B/run-manifest.json"
+      - name: Encrypt the bundle for private archive
+        # Only ciphertext leaves the runner. The encryption public key is
+        # checked in (deploy/pilot/bundle-encryption-public.asc); the
+        # decryption key never touches CI.
+        run: |
+          command -v gpg >/dev/null || { sudo apt-get update && sudo apt-get install -y gnupg; }
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"; mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          gpg --batch --import deploy/pilot/bundle-encryption-public.asc
+          fpr=$(gpg --batch --with-colons -k | awk -F: '/^fpr:/ {print $10; exit}')
+          tar -C "$RUNNER_TEMP/pilot" -czf "$RUNNER_TEMP/pilot-bundle.tar.gz" bundle
+          gpg --batch --yes --trust-model always --recipient "$fpr" --encrypt \
+            --output "$RUNNER_TEMP/pilot-bundle.tar.gz.gpg" "$RUNNER_TEMP/pilot-bundle.tar.gz"
+          rm -f "$RUNNER_TEMP/pilot-bundle.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pilot-run-bundle-encrypted
+          path: ${{ runner.temp }}/pilot-bundle.tar.gz.gpg
+          retention-days: 14
+          if-no-files-found: error
       - name: Collect logs on failure
         if: failure()
         # Redact bech32 secret keys (nsec1...) defensively; key material is
