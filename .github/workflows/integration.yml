@@ -39,7 +39,17 @@ jobs:
           cp "$RUNNER_TEMP/pilot/registry.yaml" "$RUNNER_TEMP/pilot/iac.json" "$RUNNER_TEMP/pilot/operator.nsec" deploy/pilot/config/
           chmod 600 deploy/pilot/config/operator.nsec
       - name: Start local throwaway relay
-        run: docker run --rm -d --name membrane-relay -p 127.0.0.1:7778:8080 scsibug/nostr-rs-relay:0.10.0
+        # Bind only the docker bridge gateway address: reachable from the
+        # gate container via host-gateway and from the runner host for the
+        # evidence export, but not from outside the runner VM. A
+        # loopback-only publish is unreachable from containers (docker DNAT
+        # for a loopback-bound publish matches only loopback destinations,
+        # so every gate publish was silently dropped and the export read
+        # an empty relay); 0.0.0.0 would expose the relay publicly.
+        run: |
+          GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
+          echo "RELAY_IP=$GW" >> "$GITHUB_ENV"
+          docker run --rm -d --name membrane-relay -p "$GW:7778:8080" scsibug/nostr-rs-relay:0.10.0
       - name: Fetch model (real mode)
         if: inputs.model == 'real'
         run: |
@@ -142,7 +152,7 @@ jobs:
           jq -e '.ok == false and .status == "blocked" and (.error.message | test("revoked"))' \
             "$RUNNER_TEMP/pilot/revoked.json" > /dev/null \
             || { echo "FAIL: revocation 403 missing denial reason"; cat "$RUNNER_TEMP/pilot/revoked.json"; exit 1; }
-          MEMBRANE_RELAY_URL=ws://127.0.0.1:7778 membrane evidence export --format jsonl --since-secs 3600 --out "$RUNNER_TEMP/evidence.jsonl"
+          MEMBRANE_RELAY_URL="ws://${RELAY_IP}:7778" membrane evidence export --format jsonl --since-secs 3600 --out "$RUNNER_TEMP/evidence.jsonl"
           lines=$(wc -l < "$RUNNER_TEMP/evidence.jsonl"); echo "evidence_lines=$lines"; [ "$lines" -ge 1 ]
           # The revoked denial must appear as a blocked receipt correlated to
           # the pilot scope; the allowed call's receipts stay aggregate.
