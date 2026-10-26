@@ -55,8 +55,13 @@ jobs:
         run: |
           docker volume create membrane-pilot-llama-models
           docker run --rm --user 0 -v membrane-pilot-llama-models:/models curlimages/curl:8.23.0 \
-            -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+            -fsSL -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
             https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+          # The resolve URL redirects; without -L curl saves the 302 body
+          # (1118 bytes of HTML) and llama-server cannot load it. Fail on
+          # anything under 100MB so a bad fetch stops the run here.
+          docker run --rm --user 0 -v membrane-pilot-llama-models:/models alpine:3 \
+            sh -c 'test $(stat -c %s /models/qwen2.5-0.5b-instruct-q4_k_m.gguf) -gt 104857600'
       - name: Stub override (stub mode replaces the model service, enables mock replies)
         if: inputs.model == 'stub'
         run: |
@@ -105,7 +110,11 @@ jobs:
             --header @"$RUNNER_TEMP/pilot/request/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request/body.json"; }
           first=$(send "$RUNNER_TEMP/pilot/first.json"); second=$(send "$RUNNER_TEMP/pilot/replay.json")
           echo "first=$first second=$second"
-          [ "$first" = 200 ] && [ "$second" = 403 ]
+          # Separate assertions: under bash -e, the left side of an && list
+          # is exempt from errexit, so a failed first check short-circuits
+          # and the line silently passes.
+          [ "$first" = 200 ]
+          [ "$second" = 403 ]
           # The replay refusal must carry its reason, not a bare status.
           jq -e '.ok == false and .status == "blocked" and (.error.message | test("replay"))' \
             "$RUNNER_TEMP/pilot/replay.json" > /dev/null \
