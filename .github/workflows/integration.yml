@@ -6,6 +6,8 @@ name: Pilot integration (disposable)
 # Stub mode exercises the authorization path ONLY (mock model replies) -
 # a green stub run says nothing about real model serving. Real mode
 # downloads the 0.5B GGUF from Hugging Face and tests through the model.
+# Every green run ends by writing, signing, and verifying a run manifest
+# over the evidence bundle; the bundle itself stays on the disposable runner.
 on:
   workflow_dispatch:
     inputs:
@@ -24,7 +26,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Build CLI and helper
-        run: cargo build --locked -p membrane-cli --bin membrane --example operator-request
+        run: cargo build --locked -p membrane-cli --bin membrane --example operator-request --example run-manifest
       - name: Build gate image locally (as the compose file expects)
         run: docker build -f deploy/gate/Dockerfile -t ghcr.io/membrane-hq/the-membrane/membrane-gate:edge .
       - name: Generate ephemeral keys and grant
@@ -52,6 +54,7 @@ jobs:
           docker run --rm -d --name membrane-relay -p "$GW:7778:8080" scsibug/nostr-rs-relay:0.10.0
       - name: Fetch model (real mode)
         if: inputs.model == 'real'
+        id: fetch-model
         run: |
           docker volume create membrane-pilot-llama-models
           docker run --rm --user 0 -v membrane-pilot-llama-models:/models curlimages/curl:8.23.0 \
@@ -63,6 +66,13 @@ jobs:
           docker run --rm --user 0 -v membrane-pilot-llama-models:/models alpine:3 \
             sh -ec 'test $(stat -c %s /models/qwen2.5-0.5b-instruct-q4_k_m.gguf) -gt 104857600 \
               && [ "$(head -c 4 /models/qwen2.5-0.5b-instruct-q4_k_m.gguf)" = GGUF ]'
+          # Record the fetched model's identity for the run manifest.
+          model_sha256=$(docker run --rm --user 0 -v membrane-pilot-llama-models:/models alpine:3 \
+            sha256sum /models/qwen2.5-0.5b-instruct-q4_k_m.gguf | cut -d' ' -f1)
+          model_bytes=$(docker run --rm --user 0 -v membrane-pilot-llama-models:/models alpine:3 \
+            stat -c %s /models/qwen2.5-0.5b-instruct-q4_k_m.gguf)
+          echo "model_sha256=$model_sha256" >> "$GITHUB_OUTPUT"
+          echo "model_bytes=$model_bytes" >> "$GITHUB_OUTPUT"
       - name: Stub override (stub mode replaces the model service, enables mock replies)
         if: inputs.model == 'stub'
         run: |
@@ -114,6 +124,7 @@ jobs:
           done
           [ "$loaded" = 1 ] || { echo "FAIL: llama-server never reported listening"; docker compose logs --no-color llama | tail -50; exit 1; }
       - name: Authorized call returns 200, replay refused 403 with its denial reason
+        id: auth-call
         run: |
           export PATH="$PWD/target/debug:$PATH"
           export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/caller.nsec"
@@ -125,6 +136,7 @@ jobs:
             --header @"$RUNNER_TEMP/pilot/request/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request/body.json"; }
           first=$(send "$RUNNER_TEMP/pilot/first.json"); second=$(send "$RUNNER_TEMP/pilot/replay.json")
           echo "first=$first second=$second"
+          { echo "first_code=$first"; echo "second_code=$second"; } >> "$GITHUB_OUTPUT"
           # Separate assertions: under bash -e, the left side of an && list
           # is exempt from errexit, so a failed first check short-circuits
           # and the line silently passes.
@@ -161,6 +173,7 @@ jobs:
           cmp "$RUNNER_TEMP/pilot/registry.before" config/registry.yaml \
             || { echo "FAIL: live registry changed by refused apply"; exit 1; }
       - name: Policy change via shipped apply - revoked caller is refused; evidence exports
+        id: revocation
         run: |
           export PATH="$PWD/target/debug:$PATH"
           cd deploy/pilot
@@ -188,13 +201,80 @@ jobs:
           jq -e '.ok == false and .status == "blocked" and (.error.message | test("revoked"))' \
             "$RUNNER_TEMP/pilot/revoked.json" > /dev/null \
             || { echo "FAIL: revocation 403 missing denial reason"; cat "$RUNNER_TEMP/pilot/revoked.json"; exit 1; }
-          MEMBRANE_RELAY_URL="ws://${RELAY_IP}:7778" membrane evidence export --format jsonl --since-secs 3600 --out "$RUNNER_TEMP/evidence.jsonl"
-          lines=$(wc -l < "$RUNNER_TEMP/evidence.jsonl"); echo "evidence_lines=$lines"; [ "$lines" -ge 1 ]
+          mkdir -p "$RUNNER_TEMP/pilot/bundle"
+          MEMBRANE_RELAY_URL="ws://${RELAY_IP}:7778" membrane evidence export --format jsonl --since-secs 3600 \
+            --out "$RUNNER_TEMP/pilot/bundle/evidence.jsonl" \
+            --signed-events-out "$RUNNER_TEMP/pilot/bundle/signed-events.jsonl"
+          lines=$(wc -l < "$RUNNER_TEMP/pilot/bundle/evidence.jsonl"); echo "evidence_lines=$lines"; [ "$lines" -ge 1 ]
+          { echo "post_revocation_code=$code"; echo "evidence_lines=$lines"; } >> "$GITHUB_OUTPUT"
           # The revoked denial must appear as a blocked receipt correlated to
           # the pilot scope; the allowed call's receipts stay aggregate.
           jq -e 'select(.event_type == "blocked_action" and .scope_id == "pilot-scope" and ((.reason // "") | test("revoked")))' \
-            "$RUNNER_TEMP/evidence.jsonl" > /dev/null \
-            || { echo "FAIL: no scope-correlated revoked receipt in evidence export"; cat "$RUNNER_TEMP/evidence.jsonl"; exit 1; }
+            "$RUNNER_TEMP/pilot/bundle/evidence.jsonl" > /dev/null \
+            || { echo "FAIL: no scope-correlated revoked receipt in evidence export"; cat "$RUNNER_TEMP/pilot/bundle/evidence.jsonl"; exit 1; }
+      - name: Write, sign, and verify the run manifest
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          cd deploy/pilot
+          B="$RUNNER_TEMP/pilot/bundle"
+          cp config/registry.yaml "$B/registry.yaml"
+          cp "$RUNNER_TEMP/pilot/iac.json" "$B/iac.json"
+          operator_pubkey="$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")"
+          # Run scalars identify what ran, where, and from which commit.
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg commit "$GITHUB_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg model_input "${{ inputs.model }}" --arg runner "${{ runner.os }}" \
+            '{repository:$repository, commit:$commit, run_id:$run_id, run_attempt:$run_attempt, model_input:$model_input, runner:$runner}' \
+            > "$RUNNER_TEMP/pilot/run.json"
+          # Inputs bind the exact code and images the run executed. The gate
+          # image is built locally (image ID); pulled images are bound by
+          # repo digest. The workflow file hash binds the driving steps.
+          workflow_sha256=$(sha256sum "$GITHUB_WORKSPACE/.github/workflows/integration.yml" | cut -d' ' -f1)
+          gate_image_id=$(docker image inspect ghcr.io/membrane-hq/the-membrane/membrane-gate:edge -f '{{.Id}}')
+          relay_image=$(docker image inspect scsibug/nostr-rs-relay:0.10.0 -f '{{index .RepoDigests 0}}')
+          if [ "${{ inputs.model }}" = "real" ]; then
+            llama_image=$(docker image inspect ghcr.io/ggml-org/llama.cpp:server -f '{{index .RepoDigests 0}}')
+            model_json=$(jq -n --arg file qwen2.5-0.5b-instruct-q4_k_m.gguf \
+              --arg sha256 "${{ steps.fetch-model.outputs.model_sha256 }}" \
+              --argjson bytes "${{ steps.fetch-model.outputs.model_bytes }}" \
+              '{file:$file, sha256:$sha256, bytes:$bytes}')
+          else
+            llama_image=$(docker image inspect alpine -f '{{index .RepoDigests 0}}')
+            model_json='{"mock": true}'
+          fi
+          jq -n --arg workflow_sha256 "$workflow_sha256" --arg gate_image_id "$gate_image_id" \
+            --arg llama_image "$llama_image" --arg relay_image "$relay_image" --argjson model "$model_json" \
+            '{workflow_sha256:$workflow_sha256, gate_image_id:$gate_image_id, llama_image:$llama_image, relay_image:$relay_image, model:$model}' \
+            > "$RUNNER_TEMP/pilot/inputs.json"
+          # Roles are named separately even when the pilot fills them with
+          # one ephemeral operator key: the verifier checks each role on its
+          # own, so a future split-key setup needs no manifest change.
+          publishers=$(jq -R -s '[split("\n")[] | select(length > 0) | fromjson.subject_pubkey] | unique' "$B/signed-events.jsonl")
+          jq -n --arg iac_issuer "$operator_pubkey" --arg signer "$operator_pubkey" --argjson pubs "$publishers" \
+            '{iac_issuer_pubkey:$iac_issuer, receipt_publisher_pubkeys:$pubs, manifest_signer_pubkey:$signer}' \
+            > "$RUNNER_TEMP/pilot/roles.json"
+          jq -n --argjson authorized "${{ steps.auth-call.outputs.first_code }}" \
+            --argjson replay "${{ steps.auth-call.outputs.second_code }}" \
+            --argjson post_revocation "${{ steps.revocation.outputs.post_revocation_code }}" \
+            --argjson evidence_lines "${{ steps.revocation.outputs.evidence_lines }}" \
+            '{authorized_call_status:$authorized, replay_status:$replay, post_revocation_status:$post_revocation, evidence_lines:$evidence_lines}' \
+            > "$RUNNER_TEMP/pilot/results.json"
+          cargo run --locked -q -p membrane-cli --example run-manifest -- collect \
+            --run-json "$RUNNER_TEMP/pilot/run.json" --roles-json "$RUNNER_TEMP/pilot/roles.json" \
+            --inputs-json "$RUNNER_TEMP/pilot/inputs.json" --results-json "$RUNNER_TEMP/pilot/results.json" \
+            --file "registry.yaml=$B/registry.yaml" --file "iac.json=$B/iac.json" \
+            --file "evidence.jsonl=$B/evidence.jsonl" --file "signed-events.jsonl=$B/signed-events.jsonl" \
+            --out "$B/run-manifest.json"
+          export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/operator.nsec"
+          cargo run --locked -q -p membrane-cli --example run-manifest -- sign \
+            --manifest "$B/run-manifest.json" --out "$B/run-manifest.signed.json"
+          mv "$B/run-manifest.signed.json" "$B/run-manifest.json"
+          cargo run --locked -q -p membrane-cli --example run-manifest -- verify \
+            --manifest "$B/run-manifest.json" --bundle "$B" --signer-pubkey "$operator_pubkey"
+          # The signed bundle stays on the disposable runner for now: where
+          # durable bundles may live is a separate decision. The hash below
+          # binds this run's log to the verified manifest.
+          sha256sum "$B/run-manifest.json"
       - name: Collect logs on failure
         if: failure()
         # Redact bech32 secret keys (nsec1...) defensively; key material is
