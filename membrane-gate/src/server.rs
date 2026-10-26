@@ -200,6 +200,12 @@ async fn chat_completions(
             .authorize_identity(identity.as_deref().unwrap(), &iac, &req.model, None)
     })();
     if let Err(err) = authorization {
+        if identity.is_some() {
+            // An authenticated caller refused by its grant (revoked, window,
+            // scope) still leaves a signed blocked receipt; unauthenticated
+            // failures stay in the local audit log only.
+            publish_blocked_receipt(&state, &headers, Some(&req.model), None, &err).await;
+        }
         record_denied_identity(&state, &err, "chat", identity);
         return gate_error_response(err);
     }
@@ -258,6 +264,8 @@ async fn tools_invoke(
             if let Some(response) = hold_or_resume(&state, &headers, &req, caller, &err).await {
                 return response;
             }
+            publish_blocked_receipt(&state, &headers, Some(&req.model), Some(&req.tool), &err)
+                .await;
         }
         record_denied_identity(&state, &err, "tool", identity);
         return gate_error_response(err);
@@ -2333,6 +2341,134 @@ mod tool_invoke_policy_tests {
             v.decisions[0].authenticated_identity.as_deref(),
             Some(id.as_str())
         );
+    }
+    /// A signed chat request refused because its identity grant is revoked
+    /// leaves a signed blocked receipt on the bus, correlated to the IAC's
+    /// scope, so evidence export can tie the denial to the revoked caller.
+    #[tokio::test]
+    async fn revoked_identity_denial_publishes_scope_correlated_blocked_receipt() {
+        use membrane_core::{EventType, MembraneEvent, MembranePayload};
+        let (mut state, mut iac) = test_state(vec![], vec![]);
+        let caller = Keys::generate();
+        let id = caller.public_key().to_hex();
+        iac.caller_pubkey = Some(id.clone());
+        iac.sign(state.gate.publisher().keys()).unwrap();
+        let mut registry = state.gate.registry().clone();
+        let mut grant = registry.identities.values().next().unwrap().clone();
+        grant.revoked = true;
+        registry.identities = [(id.clone(), grant)].into();
+        state.gate = Arc::new(Gate::new(
+            registry,
+            BusPublisher::new(BusPublisherConfig {
+                relay_url: "memory://identity-http".into(),
+                keys: state.gate.publisher().keys().clone(),
+            }),
+        ));
+        state.default_iac = Some(iac.clone());
+        let req = ChatRequest {
+            model: "demo".into(),
+            messages: vec![crate::ChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            stream: false,
+        };
+        let proof = membrane_core::caller::CallerProof::sign(
+            &caller,
+            &state.gate.caller_audience(),
+            "/v1/chat/completions",
+            &req,
+            &iac,
+            now_secs(),
+            Keys::generate().public_key().to_hex(),
+        )
+        .unwrap();
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-membrane-caller-proof",
+            serde_json::to_string(&proof).unwrap().parse().unwrap(),
+        );
+        let response = chat_completions(State(state.clone()), h, Ok(Json(req))).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let blocked: Vec<MembraneEvent> = state
+            .gate
+            .publisher()
+            .retained_local_events()
+            .iter()
+            .filter_map(|e| serde_json::from_str(&e.content).ok())
+            .filter(|e: &MembraneEvent| e.event_type == EventType::ActionBlocked)
+            .collect();
+        assert_eq!(blocked.len(), 1);
+        match &blocked[0].payload {
+            MembranePayload::Generic(v) => {
+                assert_eq!(
+                    v.get("scope_id").and_then(|s| s.as_str()),
+                    Some("pilot-scope")
+                );
+                let reason = v.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+                assert!(reason.contains("revoked"), "reason was: {reason}");
+            }
+            other => panic!("blocked receipt payload was not generic: {other:?}"),
+        }
+    }
+    /// A replayed request is refused before any identity authenticates, so
+    /// it must not publish a blocked receipt: unauthenticated traffic cannot
+    /// spend relay capacity.
+    #[tokio::test]
+    async fn replay_denial_publishes_no_blocked_receipt() {
+        use membrane_core::{EventType, MembraneEvent};
+        let (mut state, mut iac) = test_state(vec![], vec![]);
+        let caller = Keys::generate();
+        let id = caller.public_key().to_hex();
+        iac.caller_pubkey = Some(id.clone());
+        iac.sign(state.gate.publisher().keys()).unwrap();
+        let mut registry = state.gate.registry().clone();
+        let grant = registry.identities.values().next().unwrap().clone();
+        registry.identities = [(id.clone(), grant)].into();
+        state.gate = Arc::new(Gate::new(
+            registry,
+            BusPublisher::new(BusPublisherConfig {
+                relay_url: "memory://identity-http".into(),
+                keys: state.gate.publisher().keys().clone(),
+            }),
+        ));
+        state.default_iac = Some(iac.clone());
+        let req = ChatRequest {
+            model: "demo".into(),
+            messages: vec![crate::ChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            stream: false,
+        };
+        let proof = membrane_core::caller::CallerProof::sign(
+            &caller,
+            &state.gate.caller_audience(),
+            "/v1/chat/completions",
+            &req,
+            &iac,
+            now_secs(),
+            Keys::generate().public_key().to_hex(),
+        )
+        .unwrap();
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-membrane-caller-proof",
+            serde_json::to_string(&proof).unwrap().parse().unwrap(),
+        );
+        let first = chat_completions(State(state.clone()), h.clone(), Ok(Json(req.clone()))).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = chat_completions(State(state.clone()), h, Ok(Json(req))).await;
+        assert_eq!(second.status(), StatusCode::FORBIDDEN);
+        let blocked = state
+            .gate
+            .publisher()
+            .retained_local_events()
+            .iter()
+            .filter_map(|e| serde_json::from_str::<MembraneEvent>(&e.content).ok())
+            .filter(|e| e.event_type == EventType::ActionBlocked)
+            .count();
+        assert_eq!(blocked, 0);
     }
     #[tokio::test]
     async fn reconciliation_reads_only_and_never_unblocks_same_id() {

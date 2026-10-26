@@ -51,11 +51,27 @@ pub struct BusPublisherConfig {
 
 pub struct BusPublisher {
     config: BusPublisherConfig,
+    /// Envelopes signed on a local in-memory bus, in publish order. Empty
+    /// for relay-backed publishers; lets tests and offline runs inspect
+    /// what the local bus accepted.
+    retained_local: std::sync::Mutex<Vec<Event>>,
 }
 
 impl BusPublisher {
     pub fn new(config: BusPublisherConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            retained_local: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Events signed on a local in-memory bus (`memory://` or `local://`),
+    /// in publish order. Empty for relay-backed publishers.
+    pub fn retained_local_events(&self) -> Vec<Event> {
+        self.retained_local
+            .lock()
+            .expect("retained local bus")
+            .clone()
     }
 
     pub fn relay_url(&self) -> &str {
@@ -95,6 +111,10 @@ impl BusPublisher {
                 kind = membrane_kind_for(event.event_type),
                 "signed MembraneEvent (in-memory bus)"
             );
+            self.retained_local
+                .lock()
+                .expect("retained local bus")
+                .push(nostr_event.clone());
             return Ok(nostr_event);
         }
 
