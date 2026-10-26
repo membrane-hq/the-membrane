@@ -306,6 +306,11 @@ enum EvidenceCommands {
         subject_pubkey: Option<String>,
         #[arg(long)]
         out: PathBuf,
+        /// Also write the full signed Membrane events (domain signature
+        /// retained) as JSON lines, so a verifier can check receipt
+        /// signatures after the relay is gone
+        #[arg(long)]
+        signed_events_out: Option<PathBuf>,
     },
 }
 
@@ -503,7 +508,18 @@ async fn main() -> Result<()> {
                 since_secs,
                 subject_pubkey,
                 out,
-            } => evidence_export(&relay, format, since_secs, subject_pubkey.as_deref(), &out).await,
+                signed_events_out,
+            } => {
+                evidence_export(
+                    &relay,
+                    format,
+                    since_secs,
+                    subject_pubkey.as_deref(),
+                    &out,
+                    signed_events_out.as_ref(),
+                )
+                .await
+            }
         },
         Commands::Iac { command } => match command {
             IacCommands::Issue {
@@ -905,19 +921,44 @@ async fn evidence_export(
     since_secs: i64,
     subject_pubkey: Option<&str>,
     out: &PathBuf,
+    signed_events_out: Option<&PathBuf>,
 ) -> Result<()> {
     if since_secs < 0 {
         bail!("--since-secs must be zero or greater");
     }
     let since = now_secs().saturating_sub(since_secs);
     let bus_events = fetch_membrane_bus_events(relay, Some(since), 10_000).await?;
-    let events: Vec<_> = bus_events
-        .iter()
+    let bus_events: Vec<_> = bus_events
+        .into_iter()
         .filter(|bus_event| {
             subject_pubkey
                 .map(|subject| bus_event.event.subject_pubkey == subject)
                 .unwrap_or(true)
         })
+        .collect();
+    if let Some(path) = signed_events_out {
+        let mut body = String::new();
+        for bus_event in &bus_events {
+            // Keep the Nostr event id next to the signed domain envelope so
+            // each line joins exactly to the id the projection exported; the
+            // id itself is unsigned transport metadata, not part of the
+            // receipt's signed fields.
+            let line = serde_json::json!({
+                "nostr_event_id": bus_event.id.to_hex(),
+                "event": bus_event.event,
+            });
+            body.push_str(&serde_json::to_string(&line)?);
+            body.push('\n');
+        }
+        std::fs::write(path, body)?;
+        println!(
+            "signed events: {} event(s), out={}",
+            bus_events.len(),
+            path.display()
+        );
+    }
+    let events: Vec<_> = bus_events
+        .iter()
         .map(|bus_event| {
             let id = bus_event.id.to_hex();
             SiemEvent::from_membrane_event(&bus_event.event, Some(&id))
