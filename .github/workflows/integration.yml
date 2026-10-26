@@ -55,8 +55,14 @@ jobs:
         run: |
           docker volume create membrane-pilot-llama-models
           docker run --rm --user 0 -v membrane-pilot-llama-models:/models curlimages/curl:8.23.0 \
-            -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+            -fsSL -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
             https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+          # The resolve URL redirects; without -L curl saves the 302 body
+          # (1118 bytes of HTML) and llama-server cannot load it. Fail on
+          # anything under 100MB so a bad fetch stops the run here.
+          docker run --rm --user 0 -v membrane-pilot-llama-models:/models alpine:3 \
+            sh -ec 'test $(stat -c %s /models/qwen2.5-0.5b-instruct-q4_k_m.gguf) -gt 104857600 \
+              && [ "$(head -c 4 /models/qwen2.5-0.5b-instruct-q4_k_m.gguf)" = GGUF ]'
       - name: Stub override (stub mode replaces the model service, enables mock replies)
         if: inputs.model == 'stub'
         run: |
@@ -93,6 +99,20 @@ jobs:
           done
           echo "$body" | jq '{status, journal_available, journal_dispatch_blocked, router_stale, unresolved_operations}' || true
           [ "$ready" = 1 ] || { echo "FAIL: gate never reported status=ok"; exit 1; }
+      - name: Wait for model server load (real mode)
+        if: inputs.model == 'real'
+        run: |
+          # llama-server only starts listening after the model has loaded;
+          # gate /health does not cover the model backend.
+          cd deploy/pilot
+          loaded=""
+          for i in $(seq 1 60); do
+            if docker compose logs llama 2>&1 | grep -q "listening on "; then
+              loaded=1; break
+            fi
+            sleep 5
+          done
+          [ "$loaded" = 1 ] || { echo "FAIL: llama-server never reported listening"; docker compose logs --no-color llama | tail -50; exit 1; }
       - name: Authorized call returns 200, replay refused 403 with its denial reason
         run: |
           export PATH="$PWD/target/debug:$PATH"
@@ -105,7 +125,23 @@ jobs:
             --header @"$RUNNER_TEMP/pilot/request/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request/body.json"; }
           first=$(send "$RUNNER_TEMP/pilot/first.json"); second=$(send "$RUNNER_TEMP/pilot/replay.json")
           echo "first=$first second=$second"
-          [ "$first" = 200 ] && [ "$second" = 403 ]
+          # Separate assertions: under bash -e, the left side of an && list
+          # is exempt from errexit, so a failed first check short-circuits
+          # and the line silently passes.
+          [ "$first" = 200 ]
+          [ "$second" = 403 ]
+          # The reply must come from the mode's real backend: a stub reply
+          # carries the mock marker; a real reply must not, and must carry
+          # non-empty model content. A 200 alone proves neither.
+          if [ "${{ inputs.model }}" = "real" ]; then
+            jq -e '((.choices[0].message.content // "") | length > 0) and ((.choices[0].message.content // "") | contains("[membrane-mock]") | not)' \
+              "$RUNNER_TEMP/pilot/first.json" > /dev/null \
+              || { echo "FAIL: real-mode reply empty or came from the mock"; cat "$RUNNER_TEMP/pilot/first.json"; exit 1; }
+          else
+            jq -e '.choices[0].message.content | contains("[membrane-mock]")' \
+              "$RUNNER_TEMP/pilot/first.json" > /dev/null \
+              || { echo "FAIL: stub-mode reply missing the mock marker"; cat "$RUNNER_TEMP/pilot/first.json"; exit 1; }
+          fi
           # The replay refusal must carry its reason, not a bare status.
           jq -e '.ok == false and .status == "blocked" and (.error.message | test("replay"))' \
             "$RUNNER_TEMP/pilot/replay.json" > /dev/null \
