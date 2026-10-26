@@ -83,7 +83,7 @@ jobs:
           done
           echo "$body" | jq '{status, journal_available, journal_dispatch_blocked, router_stale, unresolved_operations}' || true
           [ "$ready" = 1 ] || { echo "FAIL: gate never reported status=ok"; exit 1; }
-      - name: Authorized call returns 200, replay returns 403
+      - name: Authorized call returns 200, replay refused 403 with its denial reason
         run: |
           export PATH="$PWD/target/debug:$PATH"
           export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/caller.nsec"
@@ -91,15 +91,20 @@ jobs:
           cargo run --locked -q -p membrane-cli --example operator-request -- sign \
             http://127.0.0.1:8787 "$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")" \
             "$RUNNER_TEMP/pilot/iac.json" /v1/chat/completions "$RUNNER_TEMP/pilot/chat.json" "$RUNNER_TEMP/pilot/request"
-          send() { curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/v1/chat/completions \
+          send() { curl -s -o "$1" -w '%{http_code}' http://127.0.0.1:8787/v1/chat/completions \
             --header @"$RUNNER_TEMP/pilot/request/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request/body.json"; }
-          first=$(send); second=$(send)
+          first=$(send "$RUNNER_TEMP/pilot/first.json"); second=$(send "$RUNNER_TEMP/pilot/replay.json")
           echo "first=$first second=$second"
           [ "$first" = 200 ] && [ "$second" = 403 ]
-      - name: Invalid candidate registry is refused, live config unchanged
+          # The replay refusal must carry its reason, not a bare status.
+          jq -e '.ok == false and .status == "blocked" and (.error.message | test("replay"))' \
+            "$RUNNER_TEMP/pilot/replay.json" > /dev/null \
+            || { echo "FAIL: replay 403 missing denial reason"; cat "$RUNNER_TEMP/pilot/replay.json"; exit 1; }
+      - name: Invalid candidate registry is refused, live config byte-unchanged
         run: |
           export PATH="$PWD/target/debug:$PATH"
           cd deploy/pilot
+          cp config/registry.yaml "$RUNNER_TEMP/pilot/registry.before"
           printf '{{{ not a registry\n' > "$RUNNER_TEMP/pilot/bad.yaml"
           if membrane registry validate "$RUNNER_TEMP/pilot/bad.yaml"; then
             echo "FAIL: invalid registry validated"; exit 1
@@ -107,25 +112,43 @@ jobs:
           if membrane registry apply "$RUNNER_TEMP/pilot/bad.yaml" --to config/registry.yaml; then
             echo "FAIL: invalid registry applied"; exit 1
           fi
-          grep -q 'revoked: false' config/registry.yaml || { echo "FAIL: live registry changed by refused apply"; exit 1; }
+          cmp "$RUNNER_TEMP/pilot/registry.before" config/registry.yaml \
+            || { echo "FAIL: live registry changed by refused apply"; exit 1; }
       - name: Policy change via shipped apply - revoked caller is refused; evidence exports
         run: |
           export PATH="$PWD/target/debug:$PATH"
           cd deploy/pilot
+          caller_pubkey="$(jq -r .caller_pubkey "$RUNNER_TEMP/pilot/keys.json")"
           cp config/registry.yaml "$RUNNER_TEMP/pilot/revoke.yaml"
           sed -i 's/revoked: false/revoked: true/' "$RUNNER_TEMP/pilot/revoke.yaml"
+          grep -q 'revoked: true' "$RUNNER_TEMP/pilot/revoke.yaml" \
+            || { echo "FAIL: revoke candidate did not flip the revoked flag"; exit 1; }
           membrane registry validate "$RUNNER_TEMP/pilot/revoke.yaml"
-          membrane registry diff config/registry.yaml "$RUNNER_TEMP/pilot/revoke.yaml"
+          membrane registry diff config/registry.yaml "$RUNNER_TEMP/pilot/revoke.yaml" | tee "$RUNNER_TEMP/pilot/diff.txt"
+          # The review diff must name the identity being revoked and the flag change.
+          grep -q "identity changed: $caller_pubkey" "$RUNNER_TEMP/pilot/diff.txt" \
+            || { echo "FAIL: diff not bound to the revoked caller identity"; exit 1; }
+          grep -q 'revoked: false -> true' "$RUNNER_TEMP/pilot/diff.txt" \
+            || { echo "FAIL: diff missing the revoked flag change"; exit 1; }
           membrane registry apply "$RUNNER_TEMP/pilot/revoke.yaml" --to config/registry.yaml
           export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/caller.nsec"
           cargo run --locked -q -p membrane-cli --example operator-request -- sign \
             http://127.0.0.1:8787 "$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")" \
             "$RUNNER_TEMP/pilot/iac.json" /v1/chat/completions "$RUNNER_TEMP/pilot/chat.json" "$RUNNER_TEMP/pilot/request2"
-          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/v1/chat/completions \
+          code=$(curl -s -o "$RUNNER_TEMP/pilot/revoked.json" -w '%{http_code}' http://127.0.0.1:8787/v1/chat/completions \
             --header @"$RUNNER_TEMP/pilot/request2/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request2/body.json")
           echo "post-revocation=$code"; [ "$code" = 403 ]
+          # The revocation refusal must carry its reason, not a bare status.
+          jq -e '.ok == false and .status == "blocked" and (.error.message | test("revoked"))' \
+            "$RUNNER_TEMP/pilot/revoked.json" > /dev/null \
+            || { echo "FAIL: revocation 403 missing denial reason"; cat "$RUNNER_TEMP/pilot/revoked.json"; exit 1; }
           MEMBRANE_RELAY_URL=ws://127.0.0.1:7778 membrane evidence export --format jsonl --since-secs 3600 --out "$RUNNER_TEMP/evidence.jsonl"
           lines=$(wc -l < "$RUNNER_TEMP/evidence.jsonl"); echo "evidence_lines=$lines"; [ "$lines" -ge 1 ]
+          # The revoked denial must appear as a blocked receipt correlated to
+          # the pilot scope; the allowed call's receipts stay aggregate.
+          jq -e 'select(.event_type == "blocked_action" and .scope_id == "pilot-scope" and ((.reason // "") | test("revoked")))' \
+            "$RUNNER_TEMP/evidence.jsonl" > /dev/null \
+            || { echo "FAIL: no scope-correlated revoked receipt in evidence export"; cat "$RUNNER_TEMP/evidence.jsonl"; exit 1; }
       - name: Collect logs on failure
         if: failure()
         # Redact bech32 secret keys (nsec1...) defensively; key material is
