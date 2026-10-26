@@ -250,7 +250,7 @@ jobs:
           # Roles are named separately even when the pilot fills them with
           # one ephemeral operator key: the verifier checks each role on its
           # own, so a future split-key setup needs no manifest change.
-          publishers=$(jq -R -s '[split("\n")[] | select(length > 0) | fromjson.subject_pubkey] | unique' "$B/signed-events.jsonl")
+          publishers=$(jq -R -s '[split("\n")[] | select(length > 0) | fromjson.event.subject_pubkey] | unique' "$B/signed-events.jsonl")
           jq -n --arg iac_issuer "$operator_pubkey" --arg signer "$operator_pubkey" --argjson pubs "$publishers" \
             '{iac_issuer_pubkey:$iac_issuer, receipt_publisher_pubkeys:$pubs, manifest_signer_pubkey:$signer}' \
             > "$RUNNER_TEMP/pilot/roles.json"
