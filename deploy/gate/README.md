@@ -18,14 +18,22 @@ doppler run --project dojopop --config prd_zorie -- bash -c '
 '
 ```
 
-2. Deploy:
+2. Deploy the exact tested gate image. Take the digest-pinned reference
+from the signed run manifest of a green pilot run (`run-manifest.json`,
+`inputs.gate_image`):
 
 ```bash
 chmod +x deploy/gate/deploy.sh
-./deploy/gate/deploy.sh
+MEMBRANE_GATE_IMAGE=ghcr.io/membrane-hq/the-membrane/membrane-gate@sha256:... ./deploy/gate/deploy.sh
 ```
 
-First run downloads **Qwen2.5-0.5B-Instruct Q4** (~400MB) and builds the gate image on the server.
+The host pulls that digest and docker verifies the content against it;
+mutable tags are refused. While the ghcr.io package is private, the host
+needs `docker login ghcr.io` with a token that can read packages.
+`./deploy/gate/deploy.sh --build-local` rebuilds from synced source
+instead, for development only; the result is not the tested image.
+
+First run downloads **Qwen2.5-0.5B-Instruct Q4** (~400MB) and pulls the gate image.
 
 ## Verify
 

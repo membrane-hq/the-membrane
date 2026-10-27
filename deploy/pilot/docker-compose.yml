@@ -1,6 +1,10 @@
 name: membrane-pilot
 
-# Pilot: published gate image plus a local example model backend.
+# Pilot: the tested gate image plus a local example model backend.
+# MEMBRANE_GATE_IMAGE selects the exact image: take the digest-pinned
+# reference (membrane-gate@sha256:...) from the signed run manifest of a
+# green pilot run so what runs here is what was tested. The integration
+# workflow sets it itself.
 # Prereq: a registry and IAC for the caller, generated with the CLI
 # (docs/quickstart.md, steps 1-3). Copy them into ./config as
 # registry.yaml, iac.json and operator.nsec (mode 0600; the signing key
@@ -29,7 +33,7 @@ services:
           memory: 3g
 
   gate:
-    image: ghcr.io/membrane-hq/the-membrane/membrane-gate:edge
+    image: ${MEMBRANE_GATE_IMAGE:?Set MEMBRANE_GATE_IMAGE to the digest-pinned gate image reference from a signed pilot run manifest}
     restart: unless-stopped
     depends_on:
       - llama

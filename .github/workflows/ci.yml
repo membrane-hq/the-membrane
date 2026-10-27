@@ -24,6 +24,13 @@ jobs:
         run: |
           cargo run --locked -q -p membrane-cli -- registry validate tools/channel-registry.example.yaml
           cargo run --locked -q -p membrane-cli -- registry validate deploy/gate/channel-registry.prod.yaml
+  release-path:
+    # Fixture tests for the tested-image release path: resolving the digest
+    # from green run records, promotion digest checks, and deploy ref rules.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: deploy/ci/test-release-path.sh
   containers:
     runs-on: ubuntu-latest
     strategy:
