@@ -1,6 +1,19 @@
 name: Publish container images
 # Merging this file to main publishes nothing: images publish only on a
 # version tag push (explicit release act) or a manual dispatch (edge tag).
+# The gate image is never rebuilt here. A release promotes the exact image
+# a green pilot run (integration.yml, publish=true) tested. The digest is
+# read from GitHub's own run records (deploy/ci/resolve-tested-image.sh:
+# repository + reviewed workflow + exact head commit + successful latest
+# attempt), never from a mutable tag, so a tag left by a failed or stale
+# attempt cannot be promoted. Promotion copies the manifest bytes through
+# the registry API and verifies their sha256 against the tested digest
+# before and after each tag write (deploy/ci/promote-tested-image.sh), so
+# digest preservation is by construction, not assumed tool behavior. Demo
+# and rollup images are not part of the pilot and still build and push here.
+# Whatever the trigger (tag push or manual dispatch), the release commit
+# must be an ancestor of protected main: tags and dispatch refs are not
+# inherently review-gated, and only merged, reviewed code may be released.
 on:
   workflow_dispatch:
     inputs:
@@ -15,6 +28,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # actions: read lets the gate job look up successful pilot runs and their
+  # logs for the tested-image marker.
+  actions: read
 jobs:
   images:
     runs-on: ubuntu-latest
@@ -23,13 +39,43 @@ jobs:
         image: ${{ (github.event_name == 'workflow_dispatch' && inputs.images == 'gate') && fromJSON('["gate"]') || fromJSON('["gate", "demo", "rollup"]') }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify the release commit is on protected main
+        run: |
+          git fetch --quiet origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "FAIL: $GITHUB_SHA is not an ancestor of protected main; refusing to release unreviewed code."
+            exit 1
+          }
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve the tested gate image from a green pilot run (gate only)
+        if: matrix.image == 'gate'
+        id: tested
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REF=$(deploy/ci/resolve-tested-image.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA")
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+      - name: Promote the tested gate image (gate only)
+        # Byte-copy promotion through the registry API: the source manifest
+        # is hashed against the tested digest before any tag is written,
+        # and every new tag is re-read and re-hashed after.
+        if: matrix.image == 'gate'
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAGS=$(deploy/ci/release-tags.sh "$GITHUB_EVENT_NAME" "$GITHUB_REF_NAME")
+          echo "release tags: $TAGS"
+          deploy/ci/promote-tested-image.sh "$GITHUB_REPOSITORY" membrane-gate             "${{ steps.tested.outputs.ref }}" $TAGS
       - uses: docker/metadata-action@v5
+        if: matrix.image != 'gate'
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}/membrane-${{ matrix.image }}
@@ -39,6 +85,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
       - uses: docker/build-push-action@v6
+        if: matrix.image != 'gate'
         with:
           context: .
           file: deploy/${{ matrix.image }}/Dockerfile

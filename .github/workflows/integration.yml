@@ -1,8 +1,14 @@
 name: Pilot integration (disposable)
 # Manual, disposable end-to-end check of the pilot compose stack on a
 # GitHub-hosted runner (free for this public repo on standard runners).
-# No user host, no credentials, no publishing: keys are generated in the
-# runner and discarded; images are built locally and never pushed.
+# No user host, no credentials: keys are generated in the runner and
+# discarded. The gate image is built locally and stays on the runner
+# unless the publish input is set; publish mode pushes the run's image to
+# GHCR as membrane-gate:sha-<commit> before the pilot starts, and the
+# pilot runs against its registry digest. A green run's signed manifest
+# records that digest, so deployment can pull the exact tested image
+# (deploy/gate, deploy/pilot). A sha tag alone marks provenance, not a
+# pass: only the signed manifest says a digest was tested.
 # Stub mode exercises the authorization path ONLY (mock model replies) -
 # a green stub run says nothing about real model serving. Real mode
 # downloads the 0.5B GGUF from Hugging Face and tests through the model.
@@ -18,8 +24,15 @@ on:
         default: 'stub'
         type: choice
         options: ['stub', 'real']
+      publish:
+        description: 'Push the gate image to GHCR as membrane-gate:sha-<commit> and test the registry digest; a green run records that digest in the signed manifest'
+        required: true
+        default: false
+        type: boolean
 permissions:
   contents: read
+  # packages: write is used only by the opt-in publish step below.
+  packages: write
 jobs:
   pilot:
     runs-on: ubuntu-latest
@@ -28,8 +41,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build CLI and helper
         run: cargo build --locked -p membrane-cli --bin membrane --example operator-request --example run-manifest
-      - name: Build gate image locally (as the compose file expects)
-        run: docker build -f deploy/gate/Dockerfile -t ghcr.io/membrane-hq/the-membrane/membrane-gate:edge .
+      - name: Build gate image locally
+        run: docker build -f deploy/gate/Dockerfile -t ghcr.io/${{ github.repository }}/membrane-gate:edge .
+      - uses: docker/login-action@v3
+        if: ${{ inputs.publish }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested gate image (publish mode)
+        # Push first, then run the pilot against the returned registry
+        # digest: the tested object is the exact object deployment pulls.
+        # A sha-<commit> tag records build provenance only; the signed run
+        # manifest is what marks a digest as tested.
+        if: ${{ inputs.publish }}
+        run: |
+          REF="ghcr.io/${GITHUB_REPOSITORY}/membrane-gate:sha-${GITHUB_SHA}"
+          docker tag "ghcr.io/${GITHUB_REPOSITORY}/membrane-gate:edge" "$REF"
+          docker push "$REF"
+          DIGEST_REF=$(docker image inspect "$REF" -f '{{index .RepoDigests 0}}')
+          [ -n "$DIGEST_REF" ] || { echo "FAIL: push returned no repo digest"; exit 1; }
+          echo "pushed $DIGEST_REF"
+          echo "MEMBRANE_GATE_IMAGE=$DIGEST_REF" >> "$GITHUB_ENV"
+      - name: Select the local build (default mode)
+        if: ${{ !inputs.publish }}
+        run: echo "MEMBRANE_GATE_IMAGE=ghcr.io/${GITHUB_REPOSITORY}/membrane-gate:edge" >> "$GITHUB_ENV"
       - name: Generate ephemeral keys and grant
         run: |
           export PATH="$PWD/target/debug:$PATH"
@@ -227,11 +263,15 @@ jobs:
             --arg model_input "${{ inputs.model }}" --arg runner "${{ runner.os }}" \
             '{repository:$repository, commit:$commit, run_id:$run_id, run_attempt:$run_attempt, model_input:$model_input, runner:$runner}' \
             > "$RUNNER_TEMP/pilot/run.json"
-          # Inputs bind the exact code and images the run executed. The gate
-          # image is built locally (image ID); pulled images are bound by
-          # repo digest. The workflow file hash binds the driving steps.
+          # Inputs bind the exact code and images the run executed. gate_image
+          # is the exact reference the pilot stack ran: the local tag in
+          # default mode, or the registry digest in publish mode (pullable,
+          # content-verified by docker on deploy). gate_image_id binds the
+          # image content in the daemon that ran the tests; in publish mode
+          # both name the same image. Pulled images are bound by repo digest.
+          # The workflow file hash binds the driving steps.
           workflow_sha256=$(sha256sum "$GITHUB_WORKSPACE/.github/workflows/integration.yml" | cut -d' ' -f1)
-          gate_image_id=$(docker image inspect ghcr.io/membrane-hq/the-membrane/membrane-gate:edge -f '{{.Id}}')
+          gate_image_id=$(docker image inspect "$MEMBRANE_GATE_IMAGE" -f '{{.Id}}')
           relay_image=$(docker image inspect scsibug/nostr-rs-relay:0.10.0 -f '{{index .RepoDigests 0}}')
           if [ "${{ inputs.model }}" = "real" ]; then
             llama_image=$(docker image inspect ghcr.io/ggml-org/llama.cpp:server -f '{{index .RepoDigests 0}}')
@@ -243,9 +283,10 @@ jobs:
             llama_image=$(docker image inspect alpine -f '{{index .RepoDigests 0}}')
             model_json='{"mock": true}'
           fi
-          jq -n --arg workflow_sha256 "$workflow_sha256" --arg gate_image_id "$gate_image_id" \
+          jq -n --arg workflow_sha256 "$workflow_sha256" --arg gate_image "$MEMBRANE_GATE_IMAGE" \
+            --arg gate_image_id "$gate_image_id" \
             --arg llama_image "$llama_image" --arg relay_image "$relay_image" --argjson model "$model_json" \
-            '{workflow_sha256:$workflow_sha256, gate_image_id:$gate_image_id, llama_image:$llama_image, relay_image:$relay_image, model:$model}' \
+            '{workflow_sha256:$workflow_sha256, gate_image:$gate_image, gate_image_id:$gate_image_id, llama_image:$llama_image, relay_image:$relay_image, model:$model}' \
             > "$RUNNER_TEMP/pilot/inputs.json"
           # Roles are named separately even when the pilot fills them with
           # one ephemeral operator key: the verifier checks each role on its
@@ -275,6 +316,20 @@ jobs:
           # The signed bundle stays on the disposable runner; the hash below
           # binds this run's log to the verified manifest.
           sha256sum "$B/run-manifest.json"
+      - name: Record the tested gate image digest
+        # Only a fully green publish-mode run reaches this step, and release
+        # promotion (publish-images.yml via deploy/ci/resolve-tested-image.sh)
+        # only accepts markers from runs whose final conclusion is success,
+        # so a marker from a run that fails in a later step (bundle encrypt,
+        # artifact upload) is never acted on. A sha-<commit> tag left behind
+        # by a failed or stale attempt is never read.
+        if: ${{ inputs.publish }}
+        run: |
+          echo "TESTED_GATE_IMAGE=$MEMBRANE_GATE_IMAGE"
+          {
+            echo "### Tested gate image"
+            echo "TESTED_GATE_IMAGE=$MEMBRANE_GATE_IMAGE"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Encrypt the bundle for private archive
         # Only ciphertext leaves the runner. The encryption public key is
         # checked in (deploy/pilot/bundle-encryption-public.asc); the
