@@ -1,0 +1,319 @@
+name: Cold install tested pilot (disposable)
+# A separate fresh runner pulls the digest from a prior green publish-mode
+# integration run on this exact commit. Never builds or pushes the gate.
+# All authorization, revocation, real-model and evidence checks below are
+# retained from integration.yml. This workflow records no promotion marker.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  # Pull existing packages only. No registry write permission.
+  packages: read
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build CLI and helper
+        run: cargo build --locked -p membrane-cli --bin membrane --example operator-request --example run-manifest
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve and cold-pull the previously tested image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          deploy/ci/resolve-tested-image.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA" --provenance-json > "$RUNNER_TEMP/source-publish.json"
+          REF=$(jq -r .ref "$RUNNER_TEMP/source-publish.json")
+          deploy/ci/pull-tested-image.sh "$GITHUB_REPOSITORY" "$REF"
+          echo "MEMBRANE_GATE_IMAGE=$REF" >> "$GITHUB_ENV"
+      - name: Generate ephemeral keys and grant
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          cargo run --locked -q -p membrane-cli --example operator-request -- setup "$RUNNER_TEMP/pilot"
+          sed -i 's#http://127.0.0.1:8080#http://llama:8080#' "$RUNNER_TEMP/pilot/registry.yaml"
+          export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/operator.nsec"
+          membrane iac issue --caller-pubkey "$(jq -r .caller_pubkey "$RUNNER_TEMP/pilot/keys.json")" \
+            --scope-id pilot-scope --model sha256:demo-model --ttl-secs 900 --out "$RUNNER_TEMP/pilot/iac.json"
+          mkdir -p deploy/pilot/config
+          cp "$RUNNER_TEMP/pilot/registry.yaml" "$RUNNER_TEMP/pilot/iac.json" "$RUNNER_TEMP/pilot/operator.nsec" deploy/pilot/config/
+          chmod 600 deploy/pilot/config/operator.nsec
+      - name: Start local throwaway relay
+        # Bind only the docker bridge gateway address: reachable from the
+        # gate container via host-gateway and from the runner host for the
+        # evidence export, but not from outside the runner VM. A
+        # loopback-only publish is unreachable from containers (docker DNAT
+        # for a loopback-bound publish matches only loopback destinations,
+        # so every gate publish was silently dropped and the export read
+        # an empty relay); 0.0.0.0 would expose the relay publicly.
+        run: |
+          GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}')
+          echo "RELAY_IP=$GW" >> "$GITHUB_ENV"
+          docker run --rm -d --name membrane-relay -p "$GW:7778:8080" scsibug/nostr-rs-relay:0.10.0
+      - name: Fetch model (real mode)
+        id: fetch-model
+        run: |
+          docker volume create membrane-pilot-llama-models
+          docker run --rm --user 0 -v membrane-pilot-llama-models:/models curlimages/curl:8.23.0 \
+            -fsSL -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+            https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+          # The resolve URL redirects; without -L curl saves the 302 body
+          # (1118 bytes of HTML) and llama-server cannot load it. Fail on
+          # anything under 100MB so a bad fetch stops the run here.
+          docker run --rm --user 0 -v membrane-pilot-llama-models:/models alpine:3 \
+            sh -ec 'test $(stat -c %s /models/qwen2.5-0.5b-instruct-q4_k_m.gguf) -gt 104857600 \
+              && [ "$(head -c 4 /models/qwen2.5-0.5b-instruct-q4_k_m.gguf)" = GGUF ]'
+          # Record the fetched model's identity for the run manifest.
+          model_sha256=$(docker run --rm --user 0 -v membrane-pilot-llama-models:/models alpine:3 \
+            sha256sum /models/qwen2.5-0.5b-instruct-q4_k_m.gguf | cut -d' ' -f1)
+          model_bytes=$(docker run --rm --user 0 -v membrane-pilot-llama-models:/models alpine:3 \
+            stat -c %s /models/qwen2.5-0.5b-instruct-q4_k_m.gguf)
+          echo "model_sha256=$model_sha256" >> "$GITHUB_OUTPUT"
+          echo "model_bytes=$model_bytes" >> "$GITHUB_OUTPUT"
+      - name: Refuse an existing service on the test port
+        run: |
+          python3 - <<'PYPORT'
+          import socket
+          with socket.socket() as sock:
+              sock.settimeout(2)
+              assert sock.connect_ex(('127.0.0.1', 8787)) != 0, 'test port already occupied'
+          PYPORT
+      - name: Start the pilot stack
+        run: |
+          docker pull ghcr.io/ggml-org/llama.cpp:server
+          docker logout ghcr.io
+          cd deploy/pilot
+          EXTRA=""
+
+          MEMBRANE_RELAY_URL=ws://host.docker.internal:7778 docker compose -f docker-compose.yml $EXTRA up -d --no-build --pull never
+      - name: Bind the running gate to the pulled image and test endpoint
+        run: |
+          CID=$(docker compose -f deploy/pilot/docker-compose.yml ps -q gate)
+          deploy/ci/verify-pulled-gate.sh "$MEMBRANE_GATE_IMAGE" "$CID"
+          docker container inspect "$CID" > "$RUNNER_TEMP/runtime-before.json"
+      - name: Wait for gate readiness (status ok, journal healthy)
+        run: |
+          # /health returns 200 with a status field: ok|degraded, covering
+          # journal availability, journal dispatch blockage and router
+          # staleness. Fresh-boot semantics verified in code: router staleness
+          # is false before any router CP exists (session.rs), and a fresh
+          # operation dir has no unresolved operations, so a healthy pilot
+          # boot reaches status=ok. Gate on that; fail explicitly otherwise.
+          body=""; ready=""
+          for i in $(seq 1 90); do
+            body=$(curl -fsS http://127.0.0.1:8787/health 2>/dev/null) &&               [ "$(echo "$body" | jq -r .status)" = "ok" ] && { ready=1; break; }
+            sleep 2
+          done
+          echo "$body" | jq '{status, journal_available, journal_dispatch_blocked, router_stale, unresolved_operations}' || true
+          [ "$ready" = 1 ] || { echo "FAIL: gate never reported status=ok"; exit 1; }
+      - name: Wait for model server load (real mode)
+        run: |
+          # llama-server only starts listening after the model has loaded;
+          # gate /health does not cover the model backend.
+          cd deploy/pilot
+          loaded=""
+          for i in $(seq 1 60); do
+            if docker compose logs llama 2>&1 | grep -q "listening on "; then
+              loaded=1; break
+            fi
+            sleep 5
+          done
+          [ "$loaded" = 1 ] || { echo "FAIL: llama-server never reported listening"; docker compose logs --no-color llama | tail -50; exit 1; }
+      - name: Authorized call returns 200, replay refused 403 with its denial reason
+        id: auth-call
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/caller.nsec"
+          echo '{"model":"sha256:demo-model","messages":[{"role":"user","content":"hi"}],"stream":false}' > "$RUNNER_TEMP/pilot/chat.json"
+          cargo run --locked -q -p membrane-cli --example operator-request -- sign \
+            http://127.0.0.1:8787 "$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")" \
+            "$RUNNER_TEMP/pilot/iac.json" /v1/chat/completions "$RUNNER_TEMP/pilot/chat.json" "$RUNNER_TEMP/pilot/request"
+          send() { curl -s -o "$1" -w '%{http_code}' http://127.0.0.1:8787/v1/chat/completions \
+            --header @"$RUNNER_TEMP/pilot/request/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request/body.json"; }
+          first=$(send "$RUNNER_TEMP/pilot/first.json"); second=$(send "$RUNNER_TEMP/pilot/replay.json")
+          echo "first=$first second=$second"
+          { echo "first_code=$first"; echo "second_code=$second"; } >> "$GITHUB_OUTPUT"
+          # Separate assertions: under bash -e, the left side of an && list
+          # is exempt from errexit, so a failed first check short-circuits
+          # and the line silently passes.
+          [ "$first" = 200 ]
+          [ "$second" = 403 ]
+          # The reply must come from the mode's real backend: a stub reply
+          # carries the mock marker; a real reply must not, and must carry
+          # non-empty model content. A 200 alone proves neither.
+            jq -e '((.choices[0].message.content // "") | length > 0) and ((.choices[0].message.content // "") | contains("[membrane-mock]") | not)' \
+              "$RUNNER_TEMP/pilot/first.json" > /dev/null \
+              || { echo "FAIL: real-mode reply empty or came from the mock"; cat "$RUNNER_TEMP/pilot/first.json"; exit 1; }
+          # The replay refusal must carry its reason, not a bare status.
+          jq -e '.ok == false and .status == "blocked" and (.error.message | test("replay"))' \
+            "$RUNNER_TEMP/pilot/replay.json" > /dev/null \
+            || { echo "FAIL: replay 403 missing denial reason"; cat "$RUNNER_TEMP/pilot/replay.json"; exit 1; }
+      - name: Invalid candidate registry is refused, live config byte-unchanged
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          cd deploy/pilot
+          cp config/registry.yaml "$RUNNER_TEMP/pilot/registry.before"
+          printf '{{{ not a registry\n' > "$RUNNER_TEMP/pilot/bad.yaml"
+          if membrane registry validate "$RUNNER_TEMP/pilot/bad.yaml"; then
+            echo "FAIL: invalid registry validated"; exit 1
+          fi
+          if membrane registry apply "$RUNNER_TEMP/pilot/bad.yaml" --to config/registry.yaml; then
+            echo "FAIL: invalid registry applied"; exit 1
+          fi
+          cmp "$RUNNER_TEMP/pilot/registry.before" config/registry.yaml \
+            || { echo "FAIL: live registry changed by refused apply"; exit 1; }
+      - name: Policy change via shipped apply - revoked caller is refused; evidence exports
+        id: revocation
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          cd deploy/pilot
+          caller_pubkey="$(jq -r .caller_pubkey "$RUNNER_TEMP/pilot/keys.json")"
+          cp config/registry.yaml "$RUNNER_TEMP/pilot/revoke.yaml"
+          sed -i 's/revoked: false/revoked: true/' "$RUNNER_TEMP/pilot/revoke.yaml"
+          grep -q 'revoked: true' "$RUNNER_TEMP/pilot/revoke.yaml" \
+            || { echo "FAIL: revoke candidate did not flip the revoked flag"; exit 1; }
+          membrane registry validate "$RUNNER_TEMP/pilot/revoke.yaml"
+          membrane registry diff config/registry.yaml "$RUNNER_TEMP/pilot/revoke.yaml" | tee "$RUNNER_TEMP/pilot/diff.txt"
+          # The review diff must name the identity being revoked and the flag change.
+          grep -q "identity changed: $caller_pubkey" "$RUNNER_TEMP/pilot/diff.txt" \
+            || { echo "FAIL: diff not bound to the revoked caller identity"; exit 1; }
+          grep -q 'revoked: false -> true' "$RUNNER_TEMP/pilot/diff.txt" \
+            || { echo "FAIL: diff missing the revoked flag change"; exit 1; }
+          membrane registry apply "$RUNNER_TEMP/pilot/revoke.yaml" --to config/registry.yaml
+          export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/caller.nsec"
+          cargo run --locked -q -p membrane-cli --example operator-request -- sign \
+            http://127.0.0.1:8787 "$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")" \
+            "$RUNNER_TEMP/pilot/iac.json" /v1/chat/completions "$RUNNER_TEMP/pilot/chat.json" "$RUNNER_TEMP/pilot/request2"
+          code=$(curl -s -o "$RUNNER_TEMP/pilot/revoked.json" -w '%{http_code}' http://127.0.0.1:8787/v1/chat/completions \
+            --header @"$RUNNER_TEMP/pilot/request2/headers.txt" --data-binary @"$RUNNER_TEMP/pilot/request2/body.json")
+          echo "post-revocation=$code"; [ "$code" = 403 ]
+          # The revocation refusal must carry its reason, not a bare status.
+          jq -e '.ok == false and .status == "blocked" and (.error.message | test("revoked"))' \
+            "$RUNNER_TEMP/pilot/revoked.json" > /dev/null \
+            || { echo "FAIL: revocation 403 missing denial reason"; cat "$RUNNER_TEMP/pilot/revoked.json"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/pilot/bundle"
+          MEMBRANE_RELAY_URL="ws://${RELAY_IP}:7778" membrane evidence export --format jsonl --since-secs 3600 \
+            --out "$RUNNER_TEMP/pilot/bundle/evidence.jsonl" \
+            --signed-events-out "$RUNNER_TEMP/pilot/bundle/signed-events.jsonl"
+          lines=$(wc -l < "$RUNNER_TEMP/pilot/bundle/evidence.jsonl"); echo "evidence_lines=$lines"; [ "$lines" -ge 1 ]
+          { echo "post_revocation_code=$code"; echo "evidence_lines=$lines"; } >> "$GITHUB_OUTPUT"
+          # The revoked denial must appear as a blocked receipt correlated to
+          # the pilot scope; the allowed call's receipts stay aggregate.
+          jq -e 'select(.event_type == "blocked_action" and .scope_id == "pilot-scope" and ((.reason // "") | test("revoked")))' \
+            "$RUNNER_TEMP/pilot/bundle/evidence.jsonl" > /dev/null \
+            || { echo "FAIL: no scope-correlated revoked receipt in evidence export"; cat "$RUNNER_TEMP/pilot/bundle/evidence.jsonl"; exit 1; }
+      - name: Verify runtime binding after assertions and stop the gate
+        run: |
+          CID=$(docker compose -f deploy/pilot/docker-compose.yml ps -q gate)
+          deploy/ci/verify-pulled-gate.sh "$MEMBRANE_GATE_IMAGE" "$CID"
+          docker container inspect "$CID" > "$RUNNER_TEMP/runtime-after.json"
+          docker stop "$CID"
+          python3 - <<'PYPORT'
+          import socket
+          with socket.socket() as sock:
+              sock.settimeout(2)
+              assert sock.connect_ex(('127.0.0.1', 8787)) != 0, 'endpoint survived stopping the tested gate'
+          PYPORT
+      - name: Write, sign, and verify the run manifest
+        run: |
+          export PATH="$PWD/target/debug:$PATH"
+          cd deploy/pilot
+          B="$RUNNER_TEMP/pilot/bundle"
+          cp "$RUNNER_TEMP/source-publish.json" "$B/source-publish.json"
+          cp "$RUNNER_TEMP/runtime-before.json" "$B/runtime-before.json"
+          cp "$RUNNER_TEMP/runtime-after.json" "$B/runtime.json"
+          printf '%s\n' '{"pre_pull_absent":true,"endpoint_absent_before":true,"endpoint_absent_after_stop":true}' > "$B/cold-observations.json"
+          cp config/registry.yaml "$B/registry.yaml"
+          cp "$RUNNER_TEMP/pilot/iac.json" "$B/iac.json"
+          operator_pubkey="$(jq -r .operator_pubkey "$RUNNER_TEMP/pilot/keys.json")"
+          # Run scalars identify what ran, where, and from which commit.
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg commit "$GITHUB_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg model_input "real" --argjson install_tested "true" --arg runner "${{ runner.os }}" \
+            '{repository:$repository, commit:$commit, run_id:$run_id, run_attempt:$run_attempt, model_input:$model_input, install_tested:$install_tested, runner:$runner}' \
+            > "$RUNNER_TEMP/pilot/run.json"
+          # Bind the pulled digest and local image ID, helper source commit,
+          # model checksum and this cold-install workflow's exact bytes.
+          workflow_sha256=$(sha256sum "$GITHUB_WORKSPACE/.github/workflows/cold-install.yml" | cut -d' ' -f1)
+          gate_image_id=$(docker image inspect "$MEMBRANE_GATE_IMAGE" -f '{{.Id}}')
+          relay_image=$(docker image inspect scsibug/nostr-rs-relay:0.10.0 -f '{{index .RepoDigests 0}}')
+            llama_image=$(docker image inspect ghcr.io/ggml-org/llama.cpp:server -f '{{index .RepoDigests 0}}')
+            model_json=$(jq -n --arg file qwen2.5-0.5b-instruct-q4_k_m.gguf \
+              --arg sha256 "${{ steps.fetch-model.outputs.model_sha256 }}" \
+              --argjson bytes "${{ steps.fetch-model.outputs.model_bytes }}" \
+              '{file:$file, sha256:$sha256, bytes:$bytes}')
+          jq -n --arg workflow_sha256 "$workflow_sha256" --arg gate_image "$MEMBRANE_GATE_IMAGE" \
+            --arg gate_image_id "$gate_image_id" \
+            --arg llama_image "$llama_image" --arg relay_image "$relay_image" --argjson model "$model_json" \
+            '{workflow_sha256:$workflow_sha256, gate_image:$gate_image, gate_image_id:$gate_image_id, llama_image:$llama_image, relay_image:$relay_image, model:$model}' \
+            > "$RUNNER_TEMP/pilot/inputs.json"
+          # Roles are named separately even when the pilot fills them with
+          # one ephemeral operator key: the verifier checks each role on its
+          # own, so a future split-key setup needs no manifest change.
+          caller_pubkey=$(jq -r .caller_pubkey "$RUNNER_TEMP/pilot/keys.json")
+          publishers=$(jq -R -s '[split("\n")[] | select(length > 0) | fromjson.event.subject_pubkey] | unique' "$B/signed-events.jsonl")
+          jq -n --arg iac_issuer "$operator_pubkey" --arg signer "$operator_pubkey" --arg caller "$caller_pubkey" --argjson pubs "$publishers" \
+            '{caller_pubkey:$caller, iac_issuer_pubkey:$iac_issuer, receipt_publisher_pubkeys:$pubs, manifest_signer_pubkey:$signer}' \
+            > "$RUNNER_TEMP/pilot/roles.json"
+          jq -n --argjson authorized "${{ steps.auth-call.outputs.first_code }}" \
+            --argjson replay "${{ steps.auth-call.outputs.second_code }}" \
+            --argjson post_revocation "${{ steps.revocation.outputs.post_revocation_code }}" \
+            --argjson evidence_lines "${{ steps.revocation.outputs.evidence_lines }}" \
+            '{authorized_call_status:$authorized, replay_status:$replay, post_revocation_status:$post_revocation, evidence_lines:$evidence_lines}' \
+            > "$RUNNER_TEMP/pilot/results.json"
+          cargo run --locked -q -p membrane-cli --example run-manifest -- collect \
+            --run-json "$RUNNER_TEMP/pilot/run.json" --roles-json "$RUNNER_TEMP/pilot/roles.json" \
+            --inputs-json "$RUNNER_TEMP/pilot/inputs.json" --results-json "$RUNNER_TEMP/pilot/results.json" \
+            --file "source-publish.json=$B/source-publish.json" --file "runtime.json=$B/runtime.json" \
+            --file "runtime-before.json=$B/runtime-before.json" --file "cold-observations.json=$B/cold-observations.json" \
+            --file "registry.yaml=$B/registry.yaml" --file "iac.json=$B/iac.json" \
+            --file "evidence.jsonl=$B/evidence.jsonl" --file "signed-events.jsonl=$B/signed-events.jsonl" \
+            --out "$B/run-manifest.json"
+          export NOSTR_NSEC_FILE="$RUNNER_TEMP/pilot/operator.nsec"
+          cargo run --locked -q -p membrane-cli --example run-manifest -- sign \
+            --manifest "$B/run-manifest.json" --out "$B/run-manifest.signed.json"
+          mv "$B/run-manifest.signed.json" "$B/run-manifest.json"
+          cargo run --locked -q -p membrane-cli --example run-manifest -- verify \
+            --manifest "$B/run-manifest.json" --bundle "$B" --signer-pubkey "$operator_pubkey"
+          python3 "$GITHUB_WORKSPACE/deploy/ci/verify-cold-bundle.py" "$B"
+          # The signed bundle stays on the disposable runner; the hash below
+          # binds this run's log to the verified manifest.
+          sha256sum "$B/run-manifest.json"
+      - name: Encrypt the bundle for private archive
+        # Only ciphertext leaves the runner. The encryption public key is
+        # checked in (deploy/pilot/bundle-encryption-public.asc); the
+        # decryption key never touches CI.
+        run: |
+          command -v gpg >/dev/null || { sudo apt-get update && sudo apt-get install -y gnupg; }
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"; mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          gpg --batch --import deploy/pilot/bundle-encryption-public.asc
+          fpr=$(gpg --batch --with-colons -k | awk -F: '/^fpr:/ {print $10; exit}')
+          tar -C "$RUNNER_TEMP/pilot" -czf "$RUNNER_TEMP/pilot-bundle.tar.gz" bundle
+          gpg --batch --yes --trust-model always --recipient "$fpr" --encrypt \
+            --output "$RUNNER_TEMP/pilot-bundle.tar.gz.gpg" "$RUNNER_TEMP/pilot-bundle.tar.gz"
+          rm -f "$RUNNER_TEMP/pilot-bundle.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pilot-run-bundle-encrypted
+          path: ${{ runner.temp }}/pilot-bundle.tar.gz.gpg
+          retention-days: 14
+          if-no-files-found: error
+      - name: Collect logs on failure
+        if: failure()
+        # Redact bech32 secret keys (nsec1...) defensively; key material is
+        # never logged by the gate, but logs leave the runner only redacted.
+        run: |
+          cd deploy/pilot
+          docker compose logs --no-color 2>&1 | sed -E 's/nsec1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+/[REDACTED]/g' > "$RUNNER_TEMP/pilot-logs.txt" || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: pilot-logs
+          path: ${{ runner.temp }}/pilot-logs.txt
+          retention-days: 7

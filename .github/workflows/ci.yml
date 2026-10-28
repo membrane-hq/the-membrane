@@ -31,6 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: deploy/ci/test-release-path.sh
+      - run: deploy/ci/test-cold-install.sh
+      - run: deploy/ci/test-runtime-binding.sh
+      - run: python3 deploy/ci/test-cold-workflow.py
+      - run: python3 deploy/ci/test-cold-bundle.py
   containers:
     runs-on: ubuntu-latest
     strategy:
