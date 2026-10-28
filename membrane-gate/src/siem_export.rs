@@ -544,7 +544,7 @@ pub fn pinned_tls_config(
     pins: &[[u8; 32]],
 ) -> Result<rustls::ClientConfig, GateError> {
     use rustls::pki_types::pem::PemObject;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = membrane_core::tls::provider();
     let mut roots = RootCertStore::empty();
     let mut count = 0;
     for cert in CertificateDer::pem_slice_iter(ca_pem) {

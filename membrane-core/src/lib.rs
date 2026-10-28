@@ -10,6 +10,7 @@ pub mod rollup;
 pub mod session;
 pub mod siem;
 pub mod siem_webhook;
+pub mod tls;
 
 pub use bus::bus_root_from_events;
 pub use bus::{BusSubscriber, BusSubscriberConfig};

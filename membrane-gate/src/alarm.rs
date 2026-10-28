@@ -428,6 +428,7 @@ async fn deliver(client: &reqwest::Client, config: &AlarmConfig, record: &AlarmR
 /// off the request path; nothing here can block or allow a gate decision.
 pub fn spawn_alarm_task(audit: Arc<AuditLog>, gate: Arc<crate::Gate>, config: AlarmConfig) {
     tokio::spawn(async move {
+        membrane_core::tls::install_default_provider();
         let client = match reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())

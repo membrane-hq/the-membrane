@@ -1,3 +1,4 @@
+pub use membrane_core::tls;
 pub mod oidc;
 pub mod operations;
 pub mod policy;

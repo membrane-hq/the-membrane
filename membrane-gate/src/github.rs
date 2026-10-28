@@ -234,6 +234,7 @@ pub struct GitHubConnector {
 
 impl GitHubConnector {
     pub fn new(config: GitHubConnectorConfig) -> Self {
+        membrane_core::tls::install_default_provider();
         let client = reqwest::Client::builder()
             .user_agent("membrane-gate-github-connector/0.1")
             .redirect(reqwest::redirect::Policy::none())
