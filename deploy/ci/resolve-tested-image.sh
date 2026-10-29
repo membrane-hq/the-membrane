@@ -44,6 +44,8 @@ REPO="${1:?usage: resolve-tested-image.sh <owner/repo> <commit-sha>}"
 COMMIT="${2:?usage: resolve-tested-image.sh <owner/repo> <commit-sha>}"
 WORKFLOW_PATH=".github/workflows/integration.yml"
 STEP_NAME="Record the tested gate image digest"
+MODE="${3:-release}"
+[[ "$MODE" = release || "$MODE" = --provenance-json ]] || { echo "ERROR: invalid mode" >&2; exit 1; }
 
 RUNS_JSON=$(gh api "repos/$REPO/actions/workflows/integration.yml/runs?head_sha=$COMMIT&per_page=10")
 
@@ -83,7 +85,12 @@ for ENTRY in "${RUNS[@]}"; do
     | tail -1)
   if [ -n "$MARKER" ]; then
     echo "resolved tested image: run_id=$RUN attempt=$ATTEMPT branch=$BRANCH ref=$MARKER" >&2
-    echo "$MARKER"
+    if [ "$MODE" = --provenance-json ]; then
+      jq -n --arg ref "$MARKER" --arg repo "$REPO" --arg sha "$COMMIT" --arg run "$RUN" --arg attempt "$ATTEMPT" \
+        '{ref:$ref, repository:$repo, commit:$sha, run_id:$run, run_attempt:$attempt, run_url:("https://github.com/"+$repo+"/actions/runs/"+$run)}'
+    else
+      echo "$MARKER"
+    fi
     exit 0
   fi
   echo "run $RUN: success without a tested-image marker (publish=false); checking older runs" >&2

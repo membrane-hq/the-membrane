@@ -326,3 +326,10 @@ out=$(run_deploy "$REF" UNSET --build-local 2>&1); rc=$?
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
+
+# Optional source-run JSON must preserve existing selection semantics.
+marker_line "Record the tested gate image digest" "$REF" > "$LOGS/4242.log"
+printf '{"workflow_runs":[%s]}\n' "$VALID" > "$RUNS"
+json_out=$(STUB_RUNS_JSON="$RUNS" STUB_LOG_DIR="$LOGS" STUB_VIEW_LOG="$T/view.log" GH_TOKEN=fake PATH="$STUB:$PATH" deploy/ci/resolve-tested-image.sh "$REPO" "$COMMIT" --provenance-json)
+jq -e --arg ref "$REF" --arg sha "$COMMIT" '.ref == $ref and .commit == $sha and .run_id == "4242" and .run_attempt == "2" and .run_url == "https://github.com/membrane-hq/the-membrane/actions/runs/4242"' <<<"$json_out" >/dev/null || exit 1
+echo "1 source-run JSON fixture passed"
