@@ -10,6 +10,7 @@ use std::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    membrane_core::tls::install_default_provider();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("setup") if args.len() == 2 || args.len() == 3 => {

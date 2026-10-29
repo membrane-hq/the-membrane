@@ -168,6 +168,7 @@ impl BusPublisher {
     }
 
     async fn connect(&self) -> Result<Client> {
+        crate::tls::install_default_provider();
         let client = Client::new(self.config.keys.clone());
         client.add_relay(&self.config.relay_url).await?;
         client.connect().await;
@@ -230,6 +231,7 @@ pub async fn fetch_membrane_bus_events(
     since: Option<i64>,
     limit: usize,
 ) -> Result<Vec<MembraneBusEvent>> {
+    crate::tls::install_default_provider();
     let client = Client::new(Keys::generate());
     client.add_relay(relay_url).await?;
     client.connect().await;
