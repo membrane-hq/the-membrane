@@ -266,6 +266,7 @@ impl Transport for ReqwestTransport {
         if !(url.starts_with("https://") || loopback) {
             bail!("advisor backend url must be https (or loopback http)");
         }
+        membrane_gate::tls::install_default_provider();
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())

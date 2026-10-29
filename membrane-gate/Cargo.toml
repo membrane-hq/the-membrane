@@ -22,7 +22,7 @@ jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"
 membrane-core.workspace = true
 nostr.workspace = true
 reqwest.workspace = true
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

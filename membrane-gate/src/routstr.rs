@@ -388,6 +388,7 @@ impl fmt::Debug for HttpRoutstr {
 impl HttpRoutstr {
     pub fn new(base: &str, key: Secret, timeout: Duration) -> Result<Self, RailError> {
         // No redirects: the credential must not follow one to another host.
+        membrane_core::tls::install_default_provider();
         let http = reqwest::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())

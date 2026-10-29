@@ -85,6 +85,7 @@ impl OperatorOidc {
                 "invalid audience, claim, cache lifetime or operator mapping",
             ));
         }
+        membrane_core::tls::install_default_provider();
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(5))

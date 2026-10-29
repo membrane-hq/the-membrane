@@ -182,6 +182,7 @@ pub struct ReqwestWebhookPoster {
 
 impl ReqwestWebhookPoster {
     pub fn new() -> Result<Self, SiemWebhookError> {
+        crate::tls::install_default_provider();
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .user_agent(concat!("membrane-siem-webhook/", env!("CARGO_PKG_VERSION")))

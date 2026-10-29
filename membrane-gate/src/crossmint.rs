@@ -334,6 +334,7 @@ impl HttpCrossmint {
     ) -> Result<Self, RailError> {
         // No redirects: X-API-KEY is a custom header and would follow a
         // cross-host redirect, so the client refuses to follow any.
+        membrane_core::tls::install_default_provider();
         let http = reqwest::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
