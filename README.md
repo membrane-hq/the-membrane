@@ -42,6 +42,7 @@ The repo also includes a demo of the operator workflow: authorization checks and
 | [docs/github-connector.md](docs/github-connector.md) | GitHub connector configuration |
 | [docs/settlement-adapters.md](docs/settlement-adapters.md) | Design direction: spend as policy (Routstr, Crossmint) |
 | [docs/advisor.md](docs/advisor.md) | Recommendation advisor: turns denials into a reviewable policy patch |
+| [docs/evm-enforcement.md](docs/evm-enforcement.md) | Design direction: EVM smart accounts as an authorization destination |
 | [docs/demo.md](docs/demo.md) | Local product dashboard - one-command demo |
 | [docs/memory-as-policy.md](docs/memory-as-policy.md) | Design direction: memory operations behind the same boundary |
 | [docs/audit-fixes.md](docs/audit-fixes.md) | Enforcement fixes and remaining limits |
