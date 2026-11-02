@@ -1,7 +1,7 @@
 # Public demo sandbox
 
 Container deployment for the simulation-only dashboard at
-`https://membrane-demo.dojopop.live`.
+`https://demo.themembrane.org`.
 
 This deployment is intentionally separate from every production Membrane
 component. It requires no environment file and must never receive
@@ -34,15 +34,15 @@ The target must already provide Docker Compose and an HTTPS edge tunnel.
 ./deploy/demo/deploy.sh <ssh-host>
 ```
 
-Add the edge route `membrane-demo.dojopop.live` to
+Add the edge route `demo.themembrane.org` to
 `http://127.0.0.1:8790`. Do not add any production service or network to the
 `membrane-demo` Compose project.
 
 ## Verify
 
 ```bash
-curl --fail https://membrane-demo.dojopop.live/health
-curl -I https://membrane-demo.dojopop.live/
+curl --fail https://demo.themembrane.org/health
+curl -I https://demo.themembrane.org/
 ```
 
 Then complete the browser flow: issue → allowed action → blocked tool →

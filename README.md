@@ -25,14 +25,27 @@ The repo also includes a demo of the operator workflow: authorization checks and
 
 | File | Description |
 |------|-------------|
+| [docs/pilot.md](docs/pilot.md) | Self-hosted pilots: what a pilot covers, prerequisites, evaluation and contact |
+| [docs/quickstart.md](docs/quickstart.md) | From clone to a refused call in about five minutes |
+| [docs/operator-walkthrough.md](docs/operator-walkthrough.md) | Full operator path: keys, grants, relay, receipts and evidence export |
 | [docs/product.md](docs/product.md) | Product overview and deployment |
-| [docs/approval-gates.md](docs/approval-gates.md) | Holding out-of-scope tool calls for operator approval |
-| [docs/policy-as-code.md](docs/policy-as-code.md) | Channel registry as code: validate, diff, apply |
 | [docs/reference-stack.md](docs/reference-stack.md) | Self-hosted deployment with local models, including air-gapped operation |
+| [docs/caller-identity.md](docs/caller-identity.md) | Caller-bound signed IACs and identity grants |
+| [docs/signing-key.md](docs/signing-key.md) | Signing-key handling |
+| [docs/approval-gates.md](docs/approval-gates.md) | Holding out-of-scope tool calls for operator approval |
+| [docs/operator-oidc.md](docs/operator-oidc.md) | Operator identity through an IdP (Okta, Entra ID) |
+| [docs/operator-dashboard.md](docs/operator-dashboard.md) | Local operator audit dashboard and held-call decisions |
+| [docs/policy-as-code.md](docs/policy-as-code.md) | Channel registry as code: validate, diff, apply |
+| [docs/durable-journal.md](docs/durable-journal.md) | Durable intent journal and upstream reconciliation |
 | [docs/siem-export.md](docs/siem-export.md) | Vendor-neutral SIEM/SOC export (JSON Lines and OCSF-inspired JSON) |
+| [docs/siem-export-hardened.md](docs/siem-export-hardened.md) | Hardened SIEM export with hash-chained spool and fail-closed mode |
 | [docs/github-connector.md](docs/github-connector.md) | GitHub connector configuration |
-| [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site) | Public site repository ([themembrane.org](https://themembrane.org)) |
+| [docs/settlement-adapters.md](docs/settlement-adapters.md) | Design direction: spend as policy (Routstr, Crossmint) |
+| [docs/advisor.md](docs/advisor.md) | Recommendation advisor: turns denials into a reviewable policy patch |
 | [docs/demo.md](docs/demo.md) | Local product dashboard - one-command demo |
+| [docs/memory-as-policy.md](docs/memory-as-policy.md) | Design direction: memory operations behind the same boundary |
+| [docs/audit-fixes.md](docs/audit-fixes.md) | Enforcement fixes and remaining limits |
+| [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site) | Public site repository ([themembrane.org](https://themembrane.org)) |
 | [docs/whitepaper.md](docs/whitepaper.md) | Cognitive-boundary research specification (not operator documentation) |
 | [docs/appendix-open-research.md](docs/appendix-open-research.md) | Open-source BCI stacks, security research, Phase 0 path |
 | [docs/the-membrane-complete.md](docs/the-membrane-complete.md) | Single-file edition (whitepaper + Appendix B) |

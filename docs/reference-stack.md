@@ -85,4 +85,4 @@ Steps are in the [operator walkthrough](operator-walkthrough.md).
 
 - The intent journal is single-instance; see [durable-journal.md](durable-journal.md).
 - No live Okta or Entra exercise has been run for operator sign-in.
-- Approval gates, where a held action executes only after a human approves it, are not built.
+- Approval gates hold only `POST /v1/tools/invoke` calls to configured tools; chat and spend calls are not held. They require operator OIDC and a durable approval store. See [approval-gates.md](approval-gates.md).
