@@ -43,7 +43,7 @@ jobs:
         run: cargo build --locked -p membrane-cli --bin membrane --example operator-request --example run-manifest
       - name: Build gate image locally
         run: docker build -f deploy/gate/Dockerfile -t ghcr.io/${{ github.repository }}/membrane-gate:edge .
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: ${{ inputs.publish }}
         with:
           registry: ghcr.io
@@ -343,7 +343,7 @@ jobs:
           gpg --batch --yes --trust-model always --recipient "$fpr" --encrypt \
             --output "$RUNNER_TEMP/pilot-bundle.tar.gz.gpg" "$RUNNER_TEMP/pilot-bundle.tar.gz"
           rm -f "$RUNNER_TEMP/pilot-bundle.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pilot-run-bundle-encrypted
           path: ${{ runner.temp }}/pilot-bundle.tar.gz.gpg
@@ -356,7 +356,7 @@ jobs:
         run: |
           cd deploy/pilot
           docker compose logs --no-color 2>&1 | sed -E 's/nsec1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+/[REDACTED]/g' > "$RUNNER_TEMP/pilot-logs.txt" || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: pilot-logs
