@@ -8,8 +8,10 @@ budget. The gate reads it from a YAML file and re-reads that file on every
 identity authorization check.
 
 Because the policy is one file, it can live in version control and change
-through the same review loop as code. Three CLI commands close that loop:
-`validate` in CI, `diff` in review, `apply` on deploy.
+through the same review loop as code. Four CLI commands close that loop:
+`validate` in CI, `diff` in review, `apply` on deploy; `migrate` once per
+registry to record the first accepted generation, and again only for a
+deliberate trust reset.
 
 ## Validate
 
@@ -79,9 +81,58 @@ the live file, so the gate never reads a partial policy. Because the gate
 re-reads the registry file on every identity authorization check, the rename
 is the whole deploy: no restart, no signal, no reload window.
 
+Every apply is a new generation. The registry carries a `revision` number
+and a candidate must advance it: earlier policy rules can return only as a
+new, higher revision, never as the generation outstanding approvals are
+bound to. Monotonicity is checked against the durably recorded generation,
+not just the live file: restoring earlier bytes and re-applying them, with
+or without a revision bump, cannot move the accepted generation backwards.
+An install commits two files in order - the registry, then the generation
+record (policy epoch, revision and sha256 of the exact installed bytes) in
+`<registry>.revision-state.json`. Each write is atomic (temp file, sync,
+rename). An interrupted install fails closed: for an existing recorded
+generation, re-apply the candidate; an interrupted first install requires
+explicit `migrate`. An install lock serializes concurrent applies and
+migrates. The gate checks every live read against that record. Anything that
+did not come through `apply` - a direct file edit, a rollback to earlier
+bytes, an edit that bumps `revision` by hand, a half-finished install -
+fails closed with a 403 until the operator installs a real update. An
+approval granted under one generation can never come back to life under
+another through any supported update, even if the policy rules that return
+are identical to what was approved under.
+
+This guarantee covers the enforced path: `membrane gate` loads its startup
+policy from the same registered registry file the gate verifies, so every
+policy input to an approval's digest passes the generation check. A deployment
+that constructs the gate library with startup policy independent of the
+registered file still gets change detection through the digest, but rollback
+protection extends only to the registered file.
+
 If a broken registry ever reaches the live path by another route, the gate
-fails closed: authorization checks error until a valid file is restored.
-`apply` exists so that state is hard to reach.
+fails closed: authorization checks error until a valid file is installed
+through `apply`. `apply` exists so that state is hard to reach.
+
+The epoch is what makes reset safe. It is random, generated only by a first
+install or an explicit `membrane registry migrate --to <registry>`, carried
+forward unchanged by ordinary installs, and bound into every policy digest.
+So a live registry with no recorded generation is never silently adopted:
+`apply` refuses it, because recording one is a trust reset. Because migrate
+always starts a fresh epoch, approvals granted before a reset never match
+again - even if the reset restores identical policy rules at the original
+revision - and no one has to locate and edit the approval store. Upgrading to the generation-checking gate therefore
+takes one `migrate` per registry; until then the gate refuses calls rather
+than guess. The same refusal covers an interrupted first install (live file
+written, record never committed): the check cannot distinguish that crash
+from a deleted record, so recovery always takes the explicit `migrate` path,
+even when no earlier approvals exist to invalidate.
+
+If the record is lost or corrupt: restore the correct current record if you
+have it - a repair that invalidates nothing - or remove it deliberately and
+re-run `membrane registry migrate`, a trust reset whose fresh epoch
+invalidates every outstanding approval. Rolling the registry file and the
+record back together, or forging the record, requires the same operator
+storage access that could replace the approval store, and remains outside
+the threat model.
 
 ## Schema for editors and other tools
 

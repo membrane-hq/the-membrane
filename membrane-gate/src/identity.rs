@@ -204,19 +204,26 @@ impl Gate {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .map_err(|_| GateError::GrantWindow("system clock unavailable".into()))?;
-        self.authorize_identity_at(identity, iac, model, None, now)?;
-        let live;
-        let registry = if let Some(path) = &self.identity_registry_path {
-            live = ChannelRegistry::load(path)
-                .map_err(|e| GateError::IdentityGrant(format!("registry unavailable: {e}")))?;
-            &live
-        } else {
-            &self.registry
-        };
-        registry
-            .identities
-            .get(identity)
-            .and_then(|g| g.spend.clone())
+        // One read of the registry serves the identity check and the spend
+        // grant, so a registry install between the two cannot split them.
+        let snapshot = self.policy_snapshot(identity)?;
+        self.authorize_spend_with_snapshot(&snapshot, iac, model, now)
+    }
+    /// `authorize_spend` against an already-taken snapshot, so the caller can
+    /// keep the snapshot and refuse the dispatch if policy changes before the
+    /// rail is called.
+    pub fn authorize_spend_with_snapshot(
+        &self,
+        snapshot: &crate::policy_snapshot::PolicySnapshot,
+        iac: &IntentAuthorizationCredential,
+        model: &str,
+        now: i64,
+    ) -> Result<SpendGrant, GateError> {
+        self.authorize_with_snapshot(snapshot, iac, model, None, now, false)?;
+        snapshot
+            .grant
+            .spend
+            .clone()
             .filter(|s| s.per_call_ceiling_msat > 0 && s.per_call_ceiling_msat <= s.budget_cap_msat)
             .ok_or_else(|| GateError::Spend("no valid spend grant for identity".into()))
     }
@@ -252,18 +259,25 @@ impl Gate {
         now: i64,
         tool_pre_approved: bool,
     ) -> Result<(), GateError> {
-        let live;
-        let registry = if let Some(path) = &self.identity_registry_path {
-            live = ChannelRegistry::load(path)
-                .map_err(|e| GateError::IdentityGrant(format!("registry unavailable: {e}")))?;
-            &live
-        } else {
-            &self.registry
-        };
-        let grant = registry
-            .identities
-            .get(identity)
-            .ok_or_else(|| GateError::IdentityGrant("unknown identity".into()))?;
+        let snapshot = self.policy_snapshot(identity)?;
+        self.authorize_with_snapshot(&snapshot, iac, model, tool_repo, now, tool_pre_approved)
+    }
+
+    /// Every check `authorize_identity` makes, served from one snapshot: the
+    /// registry is read once for the request, not once per check. With
+    /// `tool_pre_approved` the tool need not be in the caller's grant or IAC;
+    /// scope, channels, model, repo and the grant window still apply.
+    pub fn authorize_with_snapshot(
+        &self,
+        snapshot: &crate::policy_snapshot::PolicySnapshot,
+        iac: &IntentAuthorizationCredential,
+        model: &str,
+        tool_repo: Option<(&str, &str)>,
+        now: i64,
+        tool_pre_approved: bool,
+    ) -> Result<(), GateError> {
+        let registry = &snapshot.live;
+        let grant = &snapshot.grant;
         if grant.revoked {
             return Err(GateError::IdentityGrant("revoked identity".into()));
         }
@@ -340,6 +354,7 @@ mod tests {
             delta_t_secs: 300,
             model_api_url: None,
             github_repo_allowlist: vec!["a/b".into()],
+            revision: 0,
         };
         (
             Gate::new(
@@ -458,11 +473,14 @@ mod tests {
         let id = c.public_key().to_hex();
         let path = std::env::temp_dir().join(format!("membrane-{}.yaml", id));
         std::fs::write(&path, serde_yaml::to_string(g.registry()).unwrap()).unwrap();
+        crate::policy::register_current_generation(&path).unwrap();
         let g = g.with_identity_registry_path(path.clone());
         g.authorize_identity(&id, &i, "m", None).unwrap();
         let mut r = g.registry().clone();
+        r.revision += 1;
         r.identities.get_mut(&id).unwrap().revoked = true;
         std::fs::write(&path, serde_yaml::to_string(&r).unwrap()).unwrap();
+        crate::policy::register_current_generation(&path).unwrap();
         assert!(g.authorize_identity(&id, &i, "m", None).is_err());
         std::fs::write(&path, "not: [valid").unwrap();
         assert!(g.authorize_identity(&id, &i, "m", None).is_err());

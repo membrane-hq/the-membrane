@@ -19,9 +19,7 @@ use membrane_core::{
     build_rollup_bundle, day_bounds_utc, validate_rollup_bundle, HttpOtsStamper, MockOtsStamper,
     OtsStamper, RollupBundle, SignedRollupBundle,
 };
-use membrane_gate::policy::{
-    diff_registries, install_registry, validate_registry_text, ValidationReport,
-};
+use membrane_gate::policy::{diff_registries, validate_registry_text, ValidationReport};
 #[cfg(feature = "demo")]
 use membrane_gate::{demo_registry, run_demo_dashboard, DemoRuntime, DemoServerState};
 use membrane_gate::{
@@ -205,6 +203,15 @@ enum RegistryCommands {
         /// Emit the diff as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Record the current live registry as the accepted generation under a
+    /// fresh policy epoch. This is the upgrade bootstrap and the explicit
+    /// trust reset: the fresh epoch is bound into every policy digest, so
+    /// approvals granted before the reset never match again.
+    Migrate {
+        /// Live registry file to record
+        #[arg(long)]
+        to: PathBuf,
     },
     /// Validate a candidate registry and atomically install it over the live file
     Apply {
@@ -649,6 +656,7 @@ async fn main() -> Result<()> {
             }
             RegistryCommands::Diff { old, new, json } => registry_diff(&old, &new, json),
             RegistryCommands::Apply { candidate, to } => registry_apply(&candidate, &to),
+            RegistryCommands::Migrate { to } => registry_migrate(&to),
         },
         Commands::Init => run_init(),
     }
@@ -801,8 +809,13 @@ async fn gate_start(
         relay_url: relay.to_string(),
         keys: keys.clone(),
     });
-    let mut gate =
-        Gate::new(registry.clone(), publisher).with_identity_registry_path(registry_path.clone());
+    // The gate verifies every live read against the generation record the
+    // installer committed (`membrane registry apply`); anything else fails
+    // closed.
+    let revision_state_path = revision_state_path(registry_path);
+    let mut gate = Gate::new(registry.clone(), publisher)
+        .with_identity_registry_path(registry_path.clone())
+        .with_revision_state_path(revision_state_path);
     if let Some(path) = std::env::var_os("MEMBRANE_OPERATOR_OIDC_CONFIG") {
         let config = serde_yaml::from_str::<membrane_gate::oidc::OidcConfig>(
             &std::fs::read_to_string(path).context("read operator OIDC config")?,
@@ -1486,6 +1499,8 @@ async fn run_iac_smoke(relay: &str, nsec: SigningKeyArgs, registry_path: &PathBu
         parent_cp_hash: "0".repeat(64),
         scope_id: None,
         tool_id: None,
+        policy_digest: None,
+        policy_revision: None,
     };
 
     println!("=== Step 1: open router without IAC (expect fail-closed) ===");
@@ -1514,6 +1529,8 @@ async fn run_iac_smoke(relay: &str, nsec: SigningKeyArgs, registry_path: &PathBu
         parent_cp_hash: outcome.cp_hash.clone(),
         scope_id: None,
         tool_id: None,
+        policy_digest: None,
+        policy_revision: None,
     };
     println!("\n=== Step 2b: chained router CP (parent = prior cp_hash) ===");
     let outcome2 = gate
@@ -1627,8 +1644,32 @@ fn registry_diff(old: &Path, new: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The one canonical generation-record location for a live registry: the
+/// MEMBRANE_REVISION_STATE override when set, otherwise a sibling of the
+/// registry file. The gate and `registry apply` share this resolution so an
+/// override never leaves the installer writing a record the gate ignores.
+fn revision_state_path(registry_path: &Path) -> std::path::PathBuf {
+    std::env::var_os("MEMBRANE_REVISION_STATE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| membrane_gate::policy::revision_state_path_for(registry_path))
+}
+
+fn registry_migrate(to: &Path) -> Result<()> {
+    let state_path = revision_state_path(to);
+    let record = membrane_gate::policy::migrate_registry(to, &state_path)?;
+    println!(
+        "recorded generation {} at {} under a fresh policy epoch",
+        record.revision,
+        state_path.display()
+    );
+    println!("trust reset: approvals granted before this point will not match again");
+    Ok(())
+}
+
 fn registry_apply(candidate: &Path, to: &Path) -> Result<()> {
-    let report = install_registry(candidate, to)?;
+    let state_path = revision_state_path(to);
+    let report =
+        membrane_gate::policy::install_registry_with_state_path(candidate, to, &state_path)?;
     print_validation_report(&report);
     if !report.is_valid() {
         bail!(

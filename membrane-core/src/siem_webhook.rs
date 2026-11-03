@@ -517,6 +517,7 @@ mod tests {
             models: vec!["allowlisted-model".into()],
             tools: vec!["tool.write".into()],
             policy_hash: Some("aa".repeat(32)),
+            iac_hash: None,
             receipt_hash: Some("bb".repeat(32)),
             parent_receipt_hash: None,
             reason: Some("tool not in allowlist".into()),

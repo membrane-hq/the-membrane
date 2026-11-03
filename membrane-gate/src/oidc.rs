@@ -649,6 +649,7 @@ mod tests {
             delta_t_secs: 300,
             model_api_url: None,
             github_repo_allowlist: vec![],
+            revision: 0,
         };
         let gate = Gate::new(
             registry,
@@ -682,18 +683,21 @@ mod tests {
         );
         let path = std::env::temp_dir().join(format!("oidc-grant-{}.yaml", req.caller_pubkey));
         std::fs::write(&path, serde_yaml::to_string(&g.registry).unwrap()).unwrap();
+        crate::policy::register_current_generation(&path).unwrap();
         g.identity_registry_path = Some(path.clone());
         let t = token("a", &claims());
         g.issue_operator_iac(&t, &req, &"0".repeat(64))
             .await
             .unwrap();
         let mut changed = g.registry.clone();
+        changed.revision += 1;
         changed
             .identities
             .get_mut(&req.caller_pubkey)
             .unwrap()
             .revoked = true;
         std::fs::write(&path, serde_yaml::to_string(&changed).unwrap()).unwrap();
+        crate::policy::register_current_generation(&path).unwrap();
         assert!(g.issue_operator_iac(&t, &req, "0").await.is_err());
         std::fs::write(&path, "not: [yaml").unwrap();
         assert!(g.issue_operator_iac(&t, &req, "0").await.is_err());

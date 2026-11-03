@@ -8,7 +8,7 @@ use crate::{cp_hash_hex, EventType, MembraneEvent, MembranePayload};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-pub const SIEM_SCHEMA_VERSION: &str = "1.0.0";
+pub const SIEM_SCHEMA_VERSION: &str = "1.1.0";
 pub const OCSF_INSPIRED_SCHEMA: &str = "ocsf-inspired-1.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,8 +28,13 @@ pub struct SiemEvent {
     pub models: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
+    /// Digest of the policy snapshot the action ran under. None on events that
+    /// predate policy binding and on blocked actions (which carry no snapshot).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_hash: Option<String>,
+    /// Hash of the IAC the action ran under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub iac_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,7 +66,7 @@ impl SiemEvent {
         let scope_id = string_field(generic, "scope_id");
         let mut models = string_array_field(generic, "model_allowlist");
         let tools = string_array_field(generic, "tool_allowlist");
-        let policy_hash = string_field(generic, "iac_hash");
+        let generic_iac_hash = string_field(generic, "iac_hash");
         let session_id = string_field(generic, "session_id");
 
         let (event_type, outcome, severity, receipt_hash) = match &event.payload {
@@ -117,8 +122,12 @@ impl SiemEvent {
         };
 
         let router_policy_hash = match &event.payload {
-            MembranePayload::Router(payload) => Some(payload.iac_hash.clone()),
+            MembranePayload::Router(payload) => payload.policy_digest.clone(),
             _ => None,
+        };
+        let iac_hash = match &event.payload {
+            MembranePayload::Router(payload) => Some(payload.iac_hash.clone()),
+            _ => generic_iac_hash,
         };
         let router_session_id = match &event.payload {
             MembranePayload::Router(payload) => Some(payload.session_nonce.to_string()),
@@ -140,7 +149,8 @@ impl SiemEvent {
             scope_id,
             models,
             tools,
-            policy_hash: policy_hash.or(router_policy_hash),
+            policy_hash: router_policy_hash,
+            iac_hash,
             receipt_hash,
             parent_receipt_hash: nonzero_hash(&event.prev_cp_hash),
             reason,
@@ -275,14 +285,43 @@ mod tests {
                 iac_hash: "ef".repeat(32),
                 scope_id: None,
                 tool_id: None,
+                policy_digest: None,
+                policy_revision: None,
             }),
         );
         let mapped = SiemEvent::from_membrane_event(&event, Some("bus-1"));
         assert_eq!(mapped.event_type, "allowed_action");
         assert_eq!(mapped.outcome, "allowed");
         assert_eq!(mapped.models, vec!["allowlisted-model"]);
-        assert_eq!(mapped.policy_hash, Some("ef".repeat(32)));
+        // The IAC hash is not the policy: policy_hash is None on receipts that
+        // predate policy binding.
+        assert_eq!(mapped.iac_hash, Some("ef".repeat(32)));
+        assert_eq!(mapped.policy_hash, None);
         assert!(mapped.receipt_hash.is_some());
+    }
+
+    #[test]
+    fn policy_bound_receipt_exports_the_policy_digest() {
+        let event = MembraneEvent::new(
+            EventType::CpRouter,
+            "agent-1",
+            "ab".repeat(32),
+            1_700_000_000,
+            MembranePayload::Router(RouterSessionPayload {
+                model_id: "allowlisted-model".into(),
+                context_merkle_root: "cd".repeat(32),
+                session_nonce: 7,
+                parent_cp_hash: "ab".repeat(32),
+                iac_hash: "ef".repeat(32),
+                scope_id: None,
+                tool_id: None,
+                policy_digest: Some("9a".repeat(32)),
+                policy_revision: None,
+            }),
+        );
+        let mapped = SiemEvent::from_membrane_event(&event, Some("bus-1"));
+        assert_eq!(mapped.policy_hash, Some("9a".repeat(32)));
+        assert_eq!(mapped.iac_hash, Some("ef".repeat(32)));
     }
 
     #[test]
@@ -321,6 +360,7 @@ mod tests {
             models: vec!["allowlisted-model".into()],
             tools: vec!["tool.write".into()],
             policy_hash: Some("aa".repeat(32)),
+            iac_hash: None,
             receipt_hash: None,
             parent_receipt_hash: Some("bb".repeat(32)),
             reason: Some("tool not in allowlist".into()),

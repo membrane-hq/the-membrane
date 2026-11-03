@@ -26,6 +26,13 @@
     "iac_hash": {
       "type": "string",
       "pattern": "^[0-9a-fA-F]{64}$"
-    }
+    },
+    "scope_id": { "type": "string", "minLength": 1 },
+    "tool_id": { "type": "string", "minLength": 1 },
+    "policy_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "policy_revision": { "type": "integer", "minimum": 0 }
   }
 }

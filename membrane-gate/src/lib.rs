@@ -2,6 +2,7 @@ pub use membrane_core::tls;
 pub mod oidc;
 pub mod operations;
 pub mod policy;
+pub mod policy_snapshot;
 use membrane_core::event::{EventType, MembraneEvent, MembranePayload, RouterSessionPayload};
 use membrane_core::iac::IntentAuthorizationCredential;
 use membrane_core::merkle::{Domain, MerkleTree};
@@ -51,6 +52,10 @@ pub enum GateError {
     Spend(String),
     #[error("SIEM export: {0}")]
     SiemExport(String),
+    #[error("policy changed between authorization and dispatch: {0}")]
+    PolicyChanged(String),
+    #[error("registry update rejected: {0}")]
+    PolicyRevision(String),
     #[error("bus error: {0}")]
     Bus(#[from] anyhow::Error),
 }
@@ -73,6 +78,12 @@ pub struct ChannelRegistry {
     /// Approval gates. Absent means out-of-scope tool calls are blocked, never held.
     #[serde(default)]
     pub approval: Option<approval::ApprovalPolicy>,
+    /// Monotonic policy generation. Every accepted write to the live registry
+    /// must carry a revision greater than the last one the gate accepted;
+    /// anything else is refused, so a restored earlier file can never read as
+    /// current policy. Legacy registries without the key load as revision 0.
+    #[serde(default)]
+    pub revision: u64,
 }
 
 fn default_delta_t_secs() -> u64 {
@@ -123,6 +134,7 @@ pub struct Gate {
     identity_registry_path: Option<std::path::PathBuf>,
     caller_challenge: String,
     replay: std::sync::Mutex<std::collections::BTreeMap<String, i64>>,
+    revision_state_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +146,11 @@ pub struct RouterSessionRequest {
     /// Recorded in the signed event so receipts bind scope and tool.
     pub scope_id: Option<String>,
     pub tool_id: Option<String>,
+    /// Digest of the policy snapshot the call was authorized under, recorded in
+    /// the signed event so the receipt names the exact enforced policy.
+    pub policy_digest: Option<String>,
+    /// The accepted registry generation the digest was taken from.
+    pub policy_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -158,7 +175,16 @@ impl Gate {
             identity_registry_path: None,
             caller_challenge: nostr::Keys::generate().public_key().to_hex(),
             replay: Default::default(),
+            revision_state_path: None,
         }
+    }
+
+    /// Where the installer's accepted-generation record lives. Default: a
+    /// sibling of the live registry file (see `policy::revision_state_path_for`);
+    /// set explicitly to override.
+    pub fn with_revision_state_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.revision_state_path = Some(path.into());
+        self
     }
 
     /// Re-read operator identity grants for each request. A bad/missing file denies.
@@ -424,6 +450,8 @@ impl Gate {
                 iac_hash,
                 scope_id: req.scope_id,
                 tool_id: req.tool_id,
+                policy_digest: req.policy_digest,
+                policy_revision: req.policy_revision,
             }),
         );
 
@@ -527,6 +555,7 @@ mod tests {
             delta_t_secs: delta_t,
             model_api_url: None,
             github_repo_allowlist: vec![],
+            revision: 0,
         };
         let publisher = BusPublisher::new(BusPublisherConfig {
             relay_url: "ws://localhost:7777".into(),
@@ -590,6 +619,7 @@ mod tests {
             delta_t_secs: 300,
             model_api_url: None,
             github_repo_allowlist: vec!["acme/pilot".into()],
+            revision: 0,
         };
         let publisher = BusPublisher::new(BusPublisherConfig {
             relay_url: "memory://test".into(),
