@@ -1127,7 +1127,7 @@ mod tests {
 
     fn event(id: &str) -> SiemEvent {
         SiemEvent {
-            schema_version: "1.0.0".into(),
+            schema_version: "1.1.0".into(),
             timestamp: 1,
             event_id: id.into(),
             event_type: "blocked_action".into(),
@@ -1139,6 +1139,7 @@ mod tests {
             models: vec![],
             tools: vec![],
             policy_hash: None,
+            iac_hash: None,
             receipt_hash: Some("r".into()),
             parent_receipt_hash: None,
             reason: Some("tool_denied".into()),

@@ -73,6 +73,14 @@ pub struct RouterSessionPayload {
     /// Tool the call invoked, when the gate routed a tool call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_id: Option<String>,
+    /// Digest of the exact policy state that authorized the call (the gate's
+    /// policy snapshot). Covered by the event hash and signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_digest: Option<String>,
+    /// The accepted registry generation the digest was taken from. None on
+    /// receipts that predate generation binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,9 +166,85 @@ mod tests {
                 iac_hash: "babe".into(),
                 scope_id: None,
                 tool_id: None,
+                policy_digest: None,
+                policy_revision: None,
             }),
         );
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("membrane.cp.router"));
+    }
+
+    #[test]
+    fn policy_digest_is_optional_and_signed_when_present() {
+        let payload = |digest: Option<String>| RouterSessionPayload {
+            model_id: "sha256:demo".into(),
+            context_merkle_root: "deadbeef".into(),
+            session_nonce: 1,
+            parent_cp_hash: "cafe".into(),
+            iac_hash: "babe".into(),
+            scope_id: None,
+            tool_id: None,
+            policy_digest: digest,
+            policy_revision: None,
+        };
+        // Absent: the field is skipped, so receipts from before the field
+        // existed round-trip unchanged.
+        let without = serde_json::to_value(payload(None)).unwrap();
+        assert!(without.get("policy_digest").is_none());
+        // Present: the digest is part of the signed payload.
+        let with = serde_json::to_value(payload(Some("ab".repeat(32)))).unwrap();
+        assert_eq!(with["policy_digest"], "ab".repeat(32));
+        // Old receipts parse with no digest.
+        let parsed: RouterSessionPayload = serde_json::from_value(without).unwrap();
+        assert_eq!(parsed.policy_digest, None);
+        // The digest changes the event hash, so it cannot be altered after signing.
+        let event = |digest: Option<String>| {
+            MembraneEvent::new(
+                EventType::CpRouter,
+                "abc123",
+                "00".repeat(32),
+                1_700_000_000,
+                MembranePayload::Router(payload(digest)),
+            )
+        };
+        assert_ne!(
+            event(None).digest().unwrap(),
+            event(Some("ab".repeat(32))).digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn verifiers_must_know_the_field_to_rehash_policy_bound_receipts() {
+        // A verifier built before policy_digest existed parses new receipts
+        // (unknown fields are ignored) but drops the digest on re-serialization,
+        // so its recomputed cp hash differs from the chain. Simulate that
+        // verifier by stripping the field the way an old parser would.
+        let bound = MembraneEvent::new(
+            EventType::CpRouter,
+            "abc123",
+            "00".repeat(32),
+            1_700_000_000,
+            MembranePayload::Router(RouterSessionPayload {
+                model_id: "sha256:demo".into(),
+                context_merkle_root: "deadbeef".into(),
+                session_nonce: 1,
+                parent_cp_hash: "cafe".into(),
+                iac_hash: "babe".into(),
+                scope_id: None,
+                tool_id: None,
+                policy_digest: Some("ab".repeat(32)),
+                policy_revision: None,
+            }),
+        );
+        let mut json = serde_json::to_value(&bound).unwrap();
+        json["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("policy_digest");
+        let stripped: MembraneEvent = serde_json::from_value(json).unwrap();
+        assert_ne!(
+            crate::cp_hash_hex(&bound).unwrap(),
+            crate::cp_hash_hex(&stripped).unwrap()
+        );
     }
 }

@@ -1,8 +1,10 @@
 //! Approval gates: a call to a tool the operator marked holdable, which the caller's
 //! grant does not cover, is held instead of blocked. A human operator approves or
-//! rejects it. An approval authorizes exactly one call, bound to the caller, scope and
-//! request bytes, and is consumed when that call is dispatched. The decision is an
-//! operator action; it never widens the caller's standing grant.
+//! rejects it. An approval authorizes exactly one call, bound to the caller, scope,
+//! IAC, the exact policy under which the hold opened and the request bytes, and is
+//! consumed when that call is dispatched. Re-issuing the IAC or changing policy
+//! invalidates the hold: the retry no longer matches and opens a fresh hold. The
+//! decision is an operator action; it never widens the caller's standing grant.
 use crate::GateError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -70,6 +72,13 @@ pub struct Approval {
     pub note: Option<String>,
     #[serde(default)]
     pub consumed_at: Option<i64>,
+    /// IAC the hold was opened under. Absent on holds recorded before approvals
+    /// were bound to the IAC and policy.
+    #[serde(default)]
+    pub iac_hash: Option<String>,
+    /// Policy snapshot digest the hold was opened under.
+    #[serde(default)]
+    pub policy_digest: Option<String>,
 }
 
 impl Approval {
@@ -91,24 +100,34 @@ impl Approval {
             "requested_at": self.requested_at, "expires_at": self.expires_at,
             "decided_by": self.decided_by, "decided_at": self.decided_at,
             "note": self.note, "consumed_at": self.consumed_at,
+            "iac_hash": self.iac_hash, "policy_digest": self.policy_digest,
             "request": self.request,
         })
     }
 }
 
-/// Hash that binds an approval to one call: the authenticated caller, the IAC scope
-/// and the exact request. Changing any request field needs a new approval.
+/// Hash that binds an approval to one call: the authenticated caller, the IAC
+/// scope, the IAC itself, the exact policy under which the hold opened and the
+/// exact request. Changing any request field, re-issuing the IAC or changing the
+/// policy needs a new approval. v2: holds recorded under v1 (caller, scope and
+/// request only) can never match a v2 hash and expire unused.
 pub fn call_hash<T: Serialize>(
     identity: &str,
     scope_id: &str,
+    iac_hash: &str,
+    policy_digest: &str,
     request: &T,
 ) -> Result<String, GateError> {
     let body = serde_json::to_vec(request).map_err(|e| GateError::Registry(e.to_string()))?;
     let mut h = Sha256::new();
-    h.update(b"membrane-approval-v1\0");
+    h.update(b"membrane-approval-v2\0");
     h.update(identity.as_bytes());
     h.update(b"\0");
     h.update(scope_id.as_bytes());
+    h.update(b"\0");
+    h.update(iac_hash.as_bytes());
+    h.update(b"\0");
+    h.update(policy_digest.as_bytes());
     h.update(b"\0");
     h.update(&body);
     Ok(hex::encode(h.finalize()))
@@ -207,6 +226,8 @@ impl ApprovalStore {
         request: serde_json::Value,
         now: i64,
         ttl_secs: i64,
+        iac_hash: &str,
+        policy_digest: &str,
     ) -> Result<(Approval, bool), GateError> {
         let mut inner = self.lock()?;
         if let Some(existing) = inner.items.values().find(|a| {
@@ -245,6 +266,8 @@ impl ApprovalStore {
             decided_at: None,
             note: None,
             consumed_at: None,
+            iac_hash: Some(iac_hash.into()),
+            policy_digest: Some(policy_digest.into()),
         };
         inner.items.insert(id.clone(), approval.clone());
         if let Err(e) = self.persist(&inner) {
@@ -274,6 +297,11 @@ impl ApprovalStore {
         }
         if before.is_expired(now) {
             return Err(store_err("approval request expired"));
+        }
+        if before.iac_hash.is_none() || before.policy_digest.is_none() {
+            return Err(store_err(
+                "legacy hold predates IAC/policy binding and can never be consumed; ask the caller to retry so a fresh hold opens",
+            ));
         }
         let item = inner.items.get_mut(id).expect("present");
         item.state = if approve {
@@ -349,6 +377,8 @@ mod tests {
                 serde_json::json!({}),
                 now,
                 100,
+                "iac",
+                "policy",
             )
             .unwrap()
             .0
@@ -368,6 +398,8 @@ mod tests {
                 serde_json::json!({}),
                 11,
                 100,
+                "iac",
+                "policy",
             )
             .unwrap();
         assert!(!fresh);
@@ -399,7 +431,18 @@ mod tests {
             .unwrap();
         assert!(matches!(store.resolve("h", 13).unwrap(), Resolution::None));
         let b = store
-            .open_hold("h2", "id", "scope", "t", "r", serde_json::json!({}), 20, 5)
+            .open_hold(
+                "h2",
+                "id",
+                "scope",
+                "t",
+                "r",
+                serde_json::json!({}),
+                20,
+                5,
+                "iac",
+                "policy",
+            )
             .unwrap()
             .0;
         store.decide(&b.id, true, "op", None, 21).unwrap();
@@ -422,6 +465,8 @@ mod tests {
                 serde_json::json!({}),
                 10,
                 100,
+                "iac",
+                "policy",
             )
             .unwrap()
             .0;
@@ -430,15 +475,55 @@ mod tests {
     }
 
     #[test]
-    fn call_hash_binds_identity_scope_and_request() {
+    fn call_hash_binds_identity_scope_iac_policy_and_request() {
         let r = serde_json::json!({"a": 1});
-        let base = call_hash("id", "s", &r).unwrap();
-        assert_ne!(base, call_hash("id2", "s", &r).unwrap());
-        assert_ne!(base, call_hash("id", "s2", &r).unwrap());
+        let base = call_hash("id", "s", "iac1", "policy1", &r).unwrap();
+        assert_eq!(base, call_hash("id", "s", "iac1", "policy1", &r).unwrap());
+        assert_ne!(base, call_hash("id2", "s", "iac1", "policy1", &r).unwrap());
+        assert_ne!(base, call_hash("id", "s2", "iac1", "policy1", &r).unwrap());
+        // A re-issued IAC (new hash) or any policy change needs a new approval.
+        assert_ne!(base, call_hash("id", "s", "iac2", "policy1", &r).unwrap());
+        assert_ne!(base, call_hash("id", "s", "iac1", "policy2", &r).unwrap());
         assert_ne!(
             base,
-            call_hash("id", "s", &serde_json::json!({"a": 2})).unwrap()
+            call_hash("id", "s", "iac1", "policy1", &serde_json::json!({"a": 2})).unwrap()
         );
+    }
+
+    #[test]
+    fn v1_holds_load_but_can_never_match_a_v2_lookup() {
+        // A store file written before approvals were bound to the IAC and
+        // policy: no iac_hash / policy_digest fields, and a v1 call hash.
+        let dir =
+            std::env::temp_dir().join(format!("membrane-approvals-v1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("approvals.json");
+        let body = serde_json::to_vec(&serde_json::json!({"a": 1})).unwrap();
+        let mut h = Sha256::new();
+        h.update(b"membrane-approval-v1\0");
+        h.update(b"id\0s\0");
+        h.update(&body);
+        let v1_hash = hex::encode(h.finalize());
+        let record = serde_json::json!([{
+            "id": "legacy", "call_hash": v1_hash, "identity": "id", "scope_id": "s",
+            "tool": "t", "target": "r", "request": {"a": 1},
+            "requested_at": 10, "expires_at": 1_000_000, "state": "approved"
+        }]);
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let store = ApprovalStore::open(&path).unwrap();
+        let loaded = store.get("legacy").unwrap().expect("v1 record loads");
+        assert_eq!(loaded.iac_hash, None);
+        assert_eq!(loaded.policy_digest, None);
+        // The current lookup hash can never equal the stored v1 hash, so the
+        // consume path can never fire for it.
+        let v2 = call_hash("id", "s", "iac1", "policy1", &serde_json::json!({"a": 1})).unwrap();
+        assert_ne!(v2, v1_hash);
+        assert!(matches!(store.resolve(&v2, 20).unwrap(), Resolution::None));
+        // And the operator API refuses to approve it: a legacy hold can neither
+        // match nor be consumed; the caller retries and a fresh v2 hold opens.
+        assert!(store.decide("legacy", true, "op", None, 21).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

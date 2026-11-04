@@ -376,6 +376,8 @@ mod tests {
                 iac_hash: "cc".repeat(32),
                 scope_id: None,
                 tool_id: None,
+                policy_digest: None,
+                policy_revision: None,
             }),
         );
         publisher.sign_membrane_event(&mut event).unwrap();

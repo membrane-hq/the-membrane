@@ -221,6 +221,22 @@ impl OperationJournal {
         })?;
         Ok(self.path.join(key))
     }
+    /// A call refused before dispatch: close the reservation with an explicit
+    /// outcome. Nothing ran upstream, so there is nothing to reconcile.
+    pub fn finish_refused(&self, path: &Path) -> Result<(), GateError> {
+        let key = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| failure("invalid operation key"))?
+            .to_string();
+        if !self.unresolved()?.iter().any(|op| op.key == key) {
+            return Err(failure("refused outcome missing unresolved intent"));
+        }
+        self.append(Record::Outcome {
+            key,
+            state: "refused".into(),
+        })
+    }
     pub fn finish(&self, path: &Path, success: bool) -> Result<(), GateError> {
         let key = path
             .file_name()
@@ -275,7 +291,7 @@ impl OperationJournal {
         }
         Ok(operations
             .into_values()
-            .filter(|o| o.state != "completed")
+            .filter(|o| !matches!(o.state.as_str(), "completed" | "refused"))
             .collect())
     }
     pub fn recover(&self, operator: &str) -> Result<Recovery, GateError> {
@@ -497,6 +513,8 @@ mod tests {
                 iac_hash: "dd".repeat(32),
                 scope_id: Some(scope.into()),
                 tool_id: None,
+                policy_digest: None,
+                policy_revision: None,
             }),
         );
         let publisher = BusPublisher::new(BusPublisherConfig {
@@ -536,6 +554,37 @@ mod tests {
         assert_eq!(j.unresolved().unwrap().len(), 2);
         drop(j);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn refused_before_dispatch_closes_the_reservation() {
+        let dir = std::env::temp_dir().join(format!("membrane-ops-refused-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let j = OperationJournal::new(dir.clone());
+        let req = crate::github::ToolInvokeRequest {
+            operation_id: Some("op-refused".into()),
+            tool: crate::github::TOOL_GITHUB_COMMENT.into(),
+            model: "m".into(),
+            owner: "a".into(),
+            repo: "b".into(),
+            issue_number: Some(1),
+            pull_number: None,
+            body: Some("x".into()),
+            commit_title: None,
+        };
+        let path = j.reserve_in_scope("caller", "scope", &req).unwrap();
+        assert_eq!(j.unresolved().unwrap().len(), 1);
+        j.finish_refused(&path).unwrap();
+        // Closed: no lingering review item, and the refusal is on record.
+        assert!(j.unresolved().unwrap().is_empty());
+        let records = j.records().unwrap();
+        assert!(records.iter().any(|r| matches!(
+            r,
+            Record::Outcome { state, .. } if state == "refused"
+        )));
+        // Refusing twice fails closed.
+        assert!(j.finish_refused(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn second_instance_is_excluded_and_lock_releases_on_drop() {

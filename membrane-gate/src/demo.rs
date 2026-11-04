@@ -208,6 +208,7 @@ pub fn demo_registry() -> crate::ChannelRegistry {
         model_api_url: None,
         // Demo tool effects stay simulated; the GitHub connector is not enabled.
         github_repo_allowlist: vec![],
+        revision: 0,
     }
 }
 
@@ -861,6 +862,8 @@ async fn run_tool_action(
                 parent_cp_hash: parent_cp_hash.clone(),
                 scope_id: Some(iac.scope_id.clone()),
                 tool_id: Some(tool.clone()),
+                policy_digest: None,
+                policy_revision: None,
             },
             now,
             prev_event_id.as_deref(),
@@ -1128,7 +1131,8 @@ fn timeline_to_siem(entry: &TimelineEntry) -> SiemEvent {
         scope_id: entry.scope_id.clone(),
         models: entry.model.iter().cloned().collect(),
         tools: entry.tool.iter().cloned().collect(),
-        policy_hash: entry.iac_hash.clone(),
+        policy_hash: None,
+        iac_hash: entry.iac_hash.clone(),
         receipt_hash: entry.cp_hash.clone(),
         parent_receipt_hash: entry.parent_cp_hash.clone(),
         reason: entry.reason.clone(),

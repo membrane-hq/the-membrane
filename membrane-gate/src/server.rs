@@ -28,6 +28,8 @@ pub struct SessionReceipt {
     pub context_merkle_root: String,
     pub parent_cp_hash: String,
     pub bus_event_id: Option<String>,
+    pub policy_digest: Option<String>,
+    pub policy_revision: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -324,10 +326,21 @@ async fn hold_or_resume(
         record_denied_identity(state, &e, "tool", Some(caller.to_string()));
         Some(gate_error_response(e))
     };
-    let hash = match crate::approval::call_hash(caller, &iac.scope_id, req) {
-        Ok(h) => h,
+    // The hold is bound to the IAC and the exact policy in force right now, so
+    // a re-issued IAC or a policy change invalidates it.
+    let snapshot = match state.gate.policy_snapshot(caller) {
+        Ok(snapshot) => snapshot,
         Err(e) => return fail(state, e),
     };
+    let iac_hash = match iac.hash_hex() {
+        Ok(hash) => hash,
+        Err(e) => return fail(state, GateError::Registry(e.to_string())),
+    };
+    let hash =
+        match crate::approval::call_hash(caller, &iac.scope_id, &iac_hash, &snapshot.digest, req) {
+            Ok(h) => h,
+            Err(e) => return fail(state, e),
+        };
     match store.resolve(&hash, now) {
         Err(e) => fail(state, e),
         Ok(Resolution::Approved(approval)) => {
@@ -375,6 +388,8 @@ async fn hold_or_resume(
                 request,
                 now,
                 policy.ttl_secs,
+                &iac_hash,
+                &snapshot.digest,
             ) {
                 Ok(v) => v,
                 Err(e) => return fail(state, e),
@@ -626,6 +641,7 @@ async fn spend_chat(
     };
     let mut identity = None;
     let mut iac_scope = None;
+    let mut authorized_policy = None;
     let authorization = (|| {
         let iac = load_iac(&headers, state.default_iac.as_ref())?;
         let proof = load_caller_proof(&headers)?;
@@ -642,9 +658,12 @@ async fn spend_chat(
             .and_then(|m| m.as_str())
             .ok_or_else(|| GateError::Registry("request has no model".into()))?;
         iac_scope = Some(iac.scope_id.clone());
-        state
+        let snapshot = state.gate.policy_snapshot(identity.as_deref().unwrap())?;
+        let grant = state
             .gate
-            .authorize_spend(identity.as_deref().unwrap(), &iac, model)
+            .authorize_spend_with_snapshot(&snapshot, &iac, model, now_secs())?;
+        authorized_policy = Some(snapshot);
+        Ok(grant)
     })();
     let grant = match authorization {
         Ok(grant) => grant,
@@ -673,6 +692,15 @@ async fn spend_chat(
         .open_budget(&grant.budget, UNIT, grant.budget_cap_msat)
     {
         return deny(&state, format!("budget unavailable: {e}"));
+    }
+    // The rail call spends under the policy read at authorization. If a
+    // registry install changed it since, refuse before any budget is held.
+    // There is no signed spend receipt yet; the refusal is audit evidence.
+    if let Some(snapshot) = &authorized_policy {
+        if let Err(err) = state.gate.dispatch_snapshot(snapshot, &identity) {
+            record_denied_identity(&state, &err, "spend", Some(identity.clone()));
+            return gate_error_response(err);
+        }
     }
     let reservation = spend_reservation_id(&identity, &scope, &req.operation_id);
     let result = service
@@ -830,6 +858,13 @@ async fn handle_chat(
     state.gate.validate_iac(Some(&iac), now)?;
     state.gate.siem_admission()?;
 
+    // One consistent read of the policy for this request. The receipt binds its
+    // digest; dispatch refuses the call if the policy has changed since.
+    let snapshot = match iac.caller_pubkey.as_deref() {
+        Some(identity) => Some(state.gate.policy_snapshot(identity)?),
+        None => None,
+    };
+
     let mut chain = state.session_chain.lock().await;
     ensure_live_session(state, &iac, &mut chain, now).await?;
 
@@ -851,6 +886,8 @@ async fn handle_chat(
         parent_cp_hash: parent_cp_hash.clone(),
         scope_id: Some(iac.scope_id.clone()),
         tool_id: None,
+        policy_digest: snapshot.as_ref().map(|s| s.digest.clone()),
+        policy_revision: snapshot.as_ref().map(|s| s.revision),
     };
 
     let publication = state.operations.begin_publication()?;
@@ -893,6 +930,8 @@ async fn handle_chat(
         context_merkle_root: outcome.context_merkle_root.clone(),
         parent_cp_hash,
         bus_event_id: outcome.bus_event_id.clone(),
+        policy_digest: snapshot.as_ref().map(|s| s.digest.clone()),
+        policy_revision: snapshot.as_ref().map(|s| s.revision),
     };
 
     info!(
@@ -904,14 +943,18 @@ async fn handle_chat(
 
     drop(chain);
 
-    state.gate.authorize_identity(
-        iac.caller_pubkey
-            .as_deref()
-            .ok_or_else(|| GateError::IdentityAuthentication("missing caller binding".into()))?,
-        &iac,
-        &req.model,
-        None,
-    )?;
+    // Dispatch under the policy the receipt names: if a registry install or a
+    // restart changed it since the intent was published, refuse; the caller
+    // retries under a fresh snapshot.
+    let caller = iac
+        .caller_pubkey
+        .as_deref()
+        .ok_or_else(|| GateError::IdentityAuthentication("missing caller binding".into()))?;
+    let snapshot = snapshot.ok_or_else(|| GateError::Registry("policy snapshot missing".into()))?;
+    let fresh = state.gate.dispatch_snapshot(&snapshot, caller)?;
+    state
+        .gate
+        .authorize_with_snapshot(&fresh, &iac, &req.model, None, now_secs(), false)?;
     *authorized = true;
     record_allowed(state, &iac, "chat");
     let response = state.proxy.chat(req).await.map_err(GateError::Bus)?;
@@ -943,6 +986,13 @@ async fn handle_tool_invoke_with(
 
     state.gate.validate_iac(Some(&iac), now)?;
     state.gate.siem_admission()?;
+
+    // One consistent read of the policy for this request. The receipt binds its
+    // digest; dispatch refuses the call if the policy has changed since.
+    let snapshot = match iac.caller_pubkey.as_deref() {
+        Some(identity) => Some(state.gate.policy_snapshot(identity)?),
+        None => None,
+    };
 
     if !iac.model_allowed(&req.model) || !state.gate.registry().model_allowlist.contains(&req.model)
     {
@@ -1012,6 +1062,8 @@ async fn handle_tool_invoke_with(
                 parent_cp_hash: parent_cp_hash.clone(),
                 scope_id: Some(iac.scope_id.clone()),
                 tool_id: Some(req.tool.clone()),
+                policy_digest: snapshot.as_ref().map(|s| s.digest.clone()),
+                policy_revision: snapshot.as_ref().map(|s| s.revision),
             },
             now,
             prev_event_id.as_deref(),
@@ -1052,31 +1104,46 @@ async fn handle_tool_invoke_with(
         context_merkle_root: outcome.context_merkle_root.clone(),
         parent_cp_hash,
         bus_event_id: outcome.bus_event_id.clone(),
+        policy_digest: snapshot.as_ref().map(|s| s.digest.clone()),
+        policy_revision: snapshot.as_ref().map(|s| s.revision),
     };
 
     // Publication may have taken time; recheck expiry and scope liveness as well
     // as identity immediately before dispatch, still under the session lock.
-    state.gate.validate_iac(Some(&iac), now_secs())?;
-    state
-        .gate
-        .check_session_liveness(&chain, &iac.scope_id, now_secs())?;
-    let caller = iac
-        .caller_pubkey
-        .as_deref()
-        .ok_or_else(|| GateError::IdentityAuthentication("missing caller binding".into()))?;
-    let target = format!("{}/{}", req.owner, req.repo);
-    if approval.is_some() {
-        state.gate.authorize_identity_approved(
-            caller,
-            &iac,
-            &req.model,
-            (&req.tool, &target),
-            now_secs(),
-        )?;
-    } else {
+    let pre_dispatch = (|| -> Result<(), GateError> {
+        state.gate.validate_iac(Some(&iac), now_secs())?;
         state
             .gate
-            .authorize_identity(caller, &iac, &req.model, Some((&req.tool, &target)))?;
+            .check_session_liveness(&chain, &iac.scope_id, now_secs())?;
+        let caller = iac
+            .caller_pubkey
+            .as_deref()
+            .ok_or_else(|| GateError::IdentityAuthentication("missing caller binding".into()))?;
+        let target = format!("{}/{}", req.owner, req.repo);
+        // Dispatch under the policy the receipt names: if a registry install or
+        // a restart changed it since the intent was published, refuse; the
+        // caller retries under a fresh snapshot.
+        let snapshot = snapshot
+            .as_ref()
+            .ok_or_else(|| GateError::Registry("policy snapshot missing".into()))?;
+        let fresh = state.gate.dispatch_snapshot(snapshot, caller)?;
+        state.gate.authorize_with_snapshot(
+            &fresh,
+            &iac,
+            &req.model,
+            Some((&req.tool, &target)),
+            now_secs(),
+            approval.is_some(),
+        )?;
+        Ok(())
+    })();
+    if let Err(err) = pre_dispatch {
+        // Refused before dispatch: close the reservation as refused. Nothing
+        // ran upstream, so there is nothing to reconcile.
+        if let Some(path) = &reservation {
+            state.operations.finish_refused(path)?;
+        }
+        return Err(err);
     }
     *authorized = true;
     record_allowed(state, &iac, "tool");
@@ -1110,6 +1177,8 @@ async fn handle_tool_invoke_with(
             "context_merkle_root": receipt.context_merkle_root,
             "parent_cp_hash": receipt.parent_cp_hash,
             "bus_event_id": receipt.bus_event_id,
+            "policy_digest": receipt.policy_digest,
+            "policy_revision": receipt.policy_revision,
         }
     });
 
@@ -1254,6 +1323,9 @@ fn attach_receipt_headers(headers: &mut HeaderMap, receipt: &SessionReceipt) {
     if let Some(id) = &receipt.bus_event_id {
         set_header(headers, "x-membrane-bus-event-id", id);
     }
+    if let Some(digest) = &receipt.policy_digest {
+        set_header(headers, "x-membrane-policy-digest", digest);
+    }
 }
 
 fn set_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
@@ -1318,6 +1390,8 @@ fn gate_error_response(err: GateError) -> Response {
         | GateError::SessionDegraded(_, _)
         | GateError::SessionStale(_, _)
         | GateError::Spend(_)
+        | GateError::PolicyChanged(_)
+        | GateError::PolicyRevision(_)
         | GateError::Connector(_) => StatusCode::FORBIDDEN,
         GateError::SiemExport(_) => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::BAD_REQUEST,
@@ -1416,6 +1490,7 @@ mod tool_invoke_policy_tests {
             delta_t_secs: 300,
             model_api_url: None,
             github_repo_allowlist: repos.clone(),
+            revision: 0,
         };
         let publisher = BusPublisher::new(BusPublisherConfig {
             relay_url: "memory://tool-policy".into(),
@@ -1676,6 +1751,176 @@ mod tool_invoke_policy_tests {
                 only_pending(&state).state,
                 crate::approval::ApprovalState::Pending
             );
+            server.abort();
+        }
+
+        /// Rebuild the gate with its identity registry on disk, so a test can
+        /// change policy between requests the way an operator install would.
+        fn put_registry_on_disk(state: &mut GateServerState) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "membrane-approval-policy-{}",
+                Keys::generate().public_key().to_hex()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("registry.yaml");
+            std::fs::write(&path, serde_yaml::to_string(state.gate.registry()).unwrap()).unwrap();
+            crate::policy::register_current_generation(&path).unwrap();
+            state.gate = Arc::new(
+                Gate::new(
+                    state.gate.registry().clone(),
+                    BusPublisher::new(BusPublisherConfig {
+                        relay_url: "memory://tool-policy".into(),
+                        keys: state.gate.publisher().keys().clone(),
+                    }),
+                )
+                .with_identity_registry_path(path.clone()),
+            );
+            path
+        }
+
+        #[tokio::test]
+        async fn policy_change_between_approval_and_retry_requires_a_fresh_hold() {
+            let (mut state, hits, server) = gated(vec![TOOL_GITHUB_COMMENT.into()]).await;
+            let path = put_registry_on_disk(&mut state);
+            let req = comment_request();
+            let (status, _) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let hold = only_pending(&state);
+            state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&hold.id, true, "oncall", None, now_secs())
+                .unwrap();
+
+            // Policy changes between the approval and the retry: a new
+            // generation, the way the versioned update path requires.
+            let mut changed = state.gate.registry().clone();
+            changed.revision += 1;
+            changed.github_repo_allowlist.push("acme/other".into());
+            std::fs::write(&path, serde_yaml::to_string(&changed).unwrap()).unwrap();
+            crate::policy::register_current_generation(&path).unwrap();
+
+            // The approval no longer matches: the call is held again, nothing
+            // is dispatched, and the fresh hold names the new policy.
+            let (status, body) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            let items = state.approvals.as_ref().unwrap().list().unwrap();
+            assert_eq!(items.len(), 2);
+            let fresh_hold = items
+                .iter()
+                .find(|a| a.state == crate::approval::ApprovalState::Pending)
+                .unwrap()
+                .clone();
+            assert_ne!(fresh_hold.id, hold.id);
+            assert_ne!(fresh_hold.policy_digest, hold.policy_digest);
+
+            // Approving the fresh hold runs the call once, and the receipt
+            // names the policy that authorized it.
+            state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&fresh_hold.id, true, "oncall", None, now_secs())
+                .unwrap();
+            let (status, body) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                body["receipt"]["policy_digest"],
+                serde_json::json!(fresh_hold.policy_digest)
+            );
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+            server.abort();
+        }
+
+        #[tokio::test]
+        async fn restored_policy_does_not_revive_the_original_approval() {
+            let (mut state, hits, server) = gated(vec![TOOL_GITHUB_COMMENT.into()]).await;
+            let path = put_registry_on_disk(&mut state);
+            let original = state.gate.registry().clone();
+            let req = comment_request();
+            let (status, _) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let hold = only_pending(&state);
+            state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&hold.id, true, "oncall", None, now_secs())
+                .unwrap();
+
+            // Policy B installs as a new generation; the approval is dead.
+            let mut policy_b = original.clone();
+            policy_b.revision += 1;
+            policy_b.github_repo_allowlist.push("acme/other".into());
+            std::fs::write(&path, serde_yaml::to_string(&policy_b).unwrap()).unwrap();
+            crate::policy::register_current_generation(&path).unwrap();
+            let (status, _) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+            // Restoring the original file bytes is a rollback: the gate
+            // rejects the registry outright instead of reviving the approval.
+            std::fs::write(&path, serde_yaml::to_string(&original).unwrap()).unwrap();
+            let (status, body) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("direct edits are rejected"));
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+            // Restoring the original CONTENT as a new generation is allowed,
+            // but the original approval still does not match: the caller is
+            // held again under generation 2.
+            let mut restored = original.clone();
+            restored.revision = policy_b.revision + 1;
+            std::fs::write(&path, serde_yaml::to_string(&restored).unwrap()).unwrap();
+            crate::policy::register_current_generation(&path).unwrap();
+            let (status, body) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+            // Neither the dead approval under generation 0 nor the dead hold
+            // under generation 1 revived: a THIRD hold opened under the
+            // restored generation.
+            let pending = state.approvals.as_ref().unwrap().list().unwrap();
+            let fresh: Vec<_> = pending
+                .iter()
+                .filter(|a| a.state == crate::approval::ApprovalState::Pending)
+                .collect();
+            assert_eq!(fresh.len(), 2);
+            assert_ne!(fresh[1].policy_digest, hold.policy_digest);
+            assert_ne!(fresh[1].policy_digest, fresh[0].policy_digest);
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+            server.abort();
+        }
+
+        #[tokio::test]
+        async fn approved_call_receipt_names_the_policy_that_authorized_it() {
+            let (state, hits, server) = gated(vec![TOOL_GITHUB_COMMENT.into()]).await;
+            let req = comment_request();
+            send(&state, &req).await;
+            let hold = only_pending(&state);
+            state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&hold.id, true, "oncall", None, now_secs())
+                .unwrap();
+            let (status, body) = send(&state, &req).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+            let digest = body["receipt"]["policy_digest"].as_str().unwrap();
+            assert_eq!(digest.len(), 64);
+            assert_eq!(
+                body["receipt"]["policy_digest"],
+                serde_json::json!(hold.policy_digest)
+            );
+            // The receipt also names the registry generation the digest was
+            // taken from.
+            assert_eq!(body["receipt"]["policy_revision"], serde_json::json!(0));
             server.abort();
         }
     }
