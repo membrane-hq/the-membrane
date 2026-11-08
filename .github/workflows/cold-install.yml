@@ -44,6 +44,9 @@ jobs:
           mkdir -p deploy/pilot/config
           cp "$RUNNER_TEMP/pilot/registry.yaml" "$RUNNER_TEMP/pilot/iac.json" "$RUNNER_TEMP/pilot/operator.nsec" deploy/pilot/config/
           chmod 600 deploy/pilot/config/operator.nsec
+          # First install of the policy generation record; without it the
+          # gate refuses dispatch for an unrecorded registry.
+          membrane registry migrate --to deploy/pilot/config/registry.yaml
       - name: Start local throwaway relay
         # Bind only the docker bridge gateway address: reachable from the
         # gate container via host-gateway and from the runner host for the
@@ -176,6 +179,8 @@ jobs:
           caller_pubkey="$(jq -r .caller_pubkey "$RUNNER_TEMP/pilot/keys.json")"
           cp config/registry.yaml "$RUNNER_TEMP/pilot/revoke.yaml"
           sed -i 's/revoked: false/revoked: true/' "$RUNNER_TEMP/pilot/revoke.yaml"
+          # A policy change must advance the recorded generation's revision.
+          printf '\nrevision: 1\n' >> "$RUNNER_TEMP/pilot/revoke.yaml"
           grep -q 'revoked: true' "$RUNNER_TEMP/pilot/revoke.yaml" \
             || { echo "FAIL: revoke candidate did not flip the revoked flag"; exit 1; }
           membrane registry validate "$RUNNER_TEMP/pilot/revoke.yaml"

@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "kid": "edge-test",
+      "alg": "RS256",
+      "use": "sig",
+      "n": "kvHvp6d8I5ibFJl_IHocKjClxc3kS7OddRtCm9ZLURVObCjMfqOsWBIa00T26qFL_-WSrsumDvs09-yXnWPK8a9LB1AWNt4tL3r2X4bmX7FpvfeEUyaUer5xs_qrngAd-_vCFyv-DgyIVTw1lfgVyi6dtlZNUmBBiHU-aGg1UGjdaxyUI2UX2VwDEezyvBnwq8k3_aQQ7hzM5IaNCbSUpJ1dLTEL0PLFpkU-FzRObxvJHVJQ7rWCBw78VqT7LnkS57NKBEqoZNg4ZHOP_IPZ15EdzOpSFD3q7Ks0fKP59ryhRp5Eu8_5OSKFa7jgzR9jSXu1cPgu23pYHBH3EHiMHQ",
+      "e": "AQAB"
+    }
+  ]
+}

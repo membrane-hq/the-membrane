@@ -823,6 +823,15 @@ async fn gate_start(
         .context("parse operator OIDC config")?;
         gate = gate.with_operator_oidc(config)?;
     }
+    if let Some(path) = std::env::var_os("MEMBRANE_EDGE_AUTH_CONFIG") {
+        let config = serde_yaml::from_str::<membrane_gate::edge_auth::EdgeAuthConfig>(
+            &std::fs::read_to_string(path).context("read edge auth config")?,
+        )
+        .context("parse edge auth config")?;
+        let issuer = config.issuer.clone();
+        gate = gate.with_edge_auth(config)?;
+        println!("gate: edge assertion required (issuer {issuer})");
+    }
     let siem_export_config = std::env::var_os(membrane_gate::siem_export::ENV_EXPORT_CONFIG);
     if let Some(path) = &siem_export_config {
         if std::env::var_os(ENV_WEBHOOK_URL).is_some() {

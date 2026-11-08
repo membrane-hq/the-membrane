@@ -97,6 +97,9 @@ async fn operator_iac(
     headers: HeaderMap,
     Json(request): Json<crate::oidc::OperatorIacRequest>,
 ) -> Response {
+    if let Some(response) = require_edge_assertion(&state, &headers, "operator.iac.issue").await {
+        return response;
+    }
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
@@ -167,6 +170,9 @@ async fn health(State(state): State<GateServerState>) -> impl IntoResponse {
             "repo_allowlist": state.gate.registry().github_repo_allowlist,
             "token_configured": state.github.config().has_token(),
         },
+        "edge_auth": {
+            "enabled": state.gate.edge_auth().is_some(),
+        },
     }))
 }
 
@@ -175,6 +181,9 @@ async fn chat_completions(
     headers: HeaderMap,
     request: Result<Json<ChatRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    if let Some(response) = require_edge_assertion(&state, &headers, "chat").await {
+        return response;
+    }
     let req = match request {
         Ok(Json(req)) => req,
         Err(rejection) => {
@@ -229,6 +238,9 @@ async fn tools_invoke(
     headers: HeaderMap,
     request: Result<Json<ToolInvokeRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
+    if let Some(response) = require_edge_assertion(&state, &headers, "tool").await {
+        return response;
+    }
     let req = match request {
         Ok(Json(req)) => req,
         Err(rejection) => {
@@ -455,6 +467,9 @@ fn operator_token(headers: &HeaderMap) -> Option<&str> {
 
 /// Operator view of holds. Requires an operator bearer token.
 async fn approvals_list(State(state): State<GateServerState>, headers: HeaderMap) -> Response {
+    if let Some(response) = require_edge_assertion(&state, &headers, "approval.list").await {
+        return response;
+    }
     let Some(store) = state.approvals.as_ref() else {
         return (
             StatusCode::NOT_FOUND,
@@ -497,6 +512,9 @@ async fn approvals_decide(
     headers: HeaderMap,
     Json(body): Json<ApprovalDecisionRequest>,
 ) -> Response {
+    if let Some(response) = require_edge_assertion(&state, &headers, "approval.decide").await {
+        return response;
+    }
     let Some(store) = state.approvals.as_ref() else {
         return (
             StatusCode::NOT_FOUND,
@@ -628,6 +646,9 @@ async fn spend_chat(
 ) -> Response {
     use crate::routstr::{AdapterError, UNIT};
     use crate::spend::SpendError;
+    if let Some(response) = require_edge_assertion(&state, &headers, "spend").await {
+        return response;
+    }
     let req = match request {
         Ok(Json(req)) => req,
         Err(rejection) => {
@@ -782,6 +803,34 @@ fn record_allowed(state: &GateServerState, iac: &IntentAuthorizationCredential, 
 }
 fn record_denied(state: &GateServerState, err: &GateError, action: &str) {
     record_denied_identity(state, err, action, None);
+}
+
+/// When the operator pins an edge issuer, every production route must carry a
+/// valid assertion from that edge before any IAC, caller-proof or operator
+/// check runs. The assertion never substitutes for those checks; it only
+/// proves the request traversed the trusted edge. Unauthenticated failures
+/// stay audit-only, like missing caller proofs. With no edge configured this
+/// is a no-op and behavior is unchanged.
+async fn require_edge_assertion(
+    state: &GateServerState,
+    headers: &HeaderMap,
+    action: &str,
+) -> Option<Response> {
+    let edge = state.gate.edge_auth()?;
+    let token = headers
+        .get(edge.header_name())
+        .and_then(|h| h.to_str().ok());
+    let result = match token {
+        Some(token) => edge.validate(token).await.map(|_| ()),
+        None => Err(GateError::IdentityAuthentication(
+            "edge assertion required".into(),
+        )),
+    };
+    if let Err(err) = result {
+        record_denied(state, &err, action);
+        return Some(gate_error_response(err));
+    }
+    None
 }
 fn record_denied_identity(
     state: &GateServerState,
@@ -1422,6 +1471,7 @@ fn now_secs() -> i64 {
 mod tool_invoke_policy_tests {
     use super::*;
     use crate::github::{GitHubConnectorConfig, TOOL_GITHUB_COMMENT, TOOL_GITHUB_MERGE};
+    use crate::proxy::ChatMessage;
     use crate::ChannelRegistry;
     use membrane_core::{BusPublisher, BusPublisherConfig};
     use nostr::Keys;
@@ -1457,9 +1507,129 @@ mod tool_invoke_policy_tests {
         assert!(state.operations.unresolved().unwrap().is_empty());
     }
 
+    fn edge_config() -> crate::edge_auth::EdgeAuthConfig {
+        crate::edge_auth::EdgeAuthConfig {
+            issuer: "https://edge.example/team".into(),
+            audience: "membrane-gate".into(),
+            jwks_url: "http://127.0.0.1:9/jwks".into(),
+            identity_claim: "sub".into(),
+            header: "cf-access-jwt-assertion".into(),
+            cache_ttl_secs: 300,
+            insecure_http_for_testing: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn edge_assertion_required_on_production_routes_when_configured() {
+        let (state, iac) = test_state_full(vec![], vec![], Some(edge_config()));
+        // /health stays reachable for edge and operator probes.
+        let response = health(State(state.clone())).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["edge_auth"]["enabled"], serde_json::json!(true));
+
+        // Chat without an assertion is refused before any caller check.
+        let request = ChatRequest {
+            model: "demo".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            stream: false,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-membrane-iac",
+            HeaderValue::from_str(&serde_json::to_string(&iac).unwrap()).unwrap(),
+        );
+        let response = chat_completions(
+            State(state.clone()),
+            headers.clone(),
+            Ok(Json(request.clone())),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("edge assertion required"));
+        // A presented assertion is verified and still fails closed when the
+        // pinned JWKS is unreachable.
+        headers.insert(
+            "cf-access-jwt-assertion",
+            HeaderValue::from_static("not-a-jwt"),
+        );
+        let response = chat_completions(State(state.clone()), headers, Ok(Json(request))).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        // The operator exchange is behind the same edge check.
+        let response = operator_iac(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(crate::oidc::OperatorIacRequest {
+                caller_pubkey: "a".repeat(64),
+                scope_id: "s".into(),
+                model: "m".into(),
+                tools: vec![],
+                ttl_secs: 60,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let (_, decisions) = state.audit.snapshot().unwrap();
+        assert_eq!(decisions.len(), 3);
+        assert!(decisions.iter().all(|d| d.outcome == "deny"));
+    }
+
+    #[tokio::test]
+    async fn no_edge_configured_leaves_routes_unchanged() {
+        let (state, _) = test_state(vec![], vec![]);
+        let response = health(State(state.clone())).await.into_response();
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["edge_auth"]["enabled"], serde_json::json!(false));
+        let response = operator_iac(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(crate::oidc::OperatorIacRequest {
+                caller_pubkey: "a".repeat(64),
+                scope_id: "s".into(),
+                model: "m".into(),
+                tools: vec![],
+                ttl_secs: 60,
+            }),
+        )
+        .await;
+        // Refused for the missing bearer token, not for a missing assertion.
+        let body = axum::body::to_bytes(response.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("operator bearer token required"));
+    }
+
     fn test_state(
         tools: Vec<String>,
         repos: Vec<String>,
+    ) -> (GateServerState, IntentAuthorizationCredential) {
+        test_state_full(tools, repos, None)
+    }
+
+    fn test_state_full(
+        tools: Vec<String>,
+        repos: Vec<String>,
+        edge_auth: Option<crate::edge_auth::EdgeAuthConfig>,
     ) -> (GateServerState, IntentAuthorizationCredential) {
         let keys = Keys::generate();
         let registry = ChannelRegistry {
@@ -1496,7 +1666,10 @@ mod tool_invoke_policy_tests {
             relay_url: "memory://tool-policy".into(),
             keys: keys.clone(),
         });
-        let gate = Gate::new(registry, publisher);
+        let mut gate = Gate::new(registry, publisher);
+        if let Some(config) = edge_auth {
+            gate = gate.with_edge_auth(config).unwrap();
+        }
         let mut iac = IntentAuthorizationCredential::new_session_with_tools(
             "pilot-scope",
             "demo",

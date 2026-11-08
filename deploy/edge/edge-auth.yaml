@@ -1,0 +1,12 @@
+# Edge assertion config for the local required-path reference deployment.
+# The issuer and audience are stand-ins for the operator's real edge identity
+# layer. jwks_url is plain HTTP only because the JWKS stand-in is a container
+# on the internal network; insecure_http_for_testing exists for exactly this
+# local/CI case and must stay off anywhere real.
+issuer: https://edge.membrane.example/required-path-reference
+audience: membrane-gate
+jwks_url: http://jwks/jwks.json
+identity_claim: sub
+header: cf-access-jwt-assertion
+cache_ttl_secs: 300
+insecure_http_for_testing: true

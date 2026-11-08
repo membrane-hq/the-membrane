@@ -43,3 +43,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: docker build -f deploy/${{ matrix.image }}/Dockerfile -t membrane-${{ matrix.image }} .
+  edge-required-path:
+    # The required-path reference deployment: direct connections to the gate
+    # and model backend must fail, production routes must refuse requests
+    # without a valid edge assertion, and the authorized path must cross
+    # edge, gate and backend. Keys are generated on the runner and discarded.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked -p membrane-cli --bin membrane --example operator-request
+      - run: docker build -f deploy/gate/Dockerfile -t membrane-gate:local .
+      - run: deploy/edge/verify.sh

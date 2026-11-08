@@ -37,6 +37,14 @@ for marker in ('[ "$first" = 200 ]', '[ "$second" = 403 ]',
                'verify-cold-bundle.py', '--no-build --pull never'):
     assert marker in cold, marker
 # Parse every run block as Bash after substituting expression placeholders.
+# Both disposable-pilot workflows must install the policy generation record
+# before the stack starts (the gate refuses dispatch for an unrecorded
+# registry), and their policy-change candidate must advance its revision.
+for name, text in (('integration', original), ('cold-install', cold)):
+    assert text.index('membrane registry migrate --to deploy/pilot/config/registry.yaml') \
+        < text.index('Start the pilot stack'), name
+    assert 'printf \'\\nrevision: 1\\n\' >> "$RUNNER_TEMP/pilot/revoke.yaml"' in text, name
+
 for match in re.finditer(r'^        run: \|\n((?:^          .*\n|^\n)+)', cold, re.M):
     script = ''.join(line[10:] if line.startswith('          ') else line
                      for line in match.group(1).splitlines(keepends=True))
