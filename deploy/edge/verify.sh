@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$(cd ../.. && pwd)
-export PATH="$ROOT/target/debug:$PATH"
+export PATH="$ROOT/target/debug:$ROOT/target/debug/examples:$PATH"
 WORK=$(mktemp -d)
 trap 'docker compose down -v --remove-orphans >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
 
