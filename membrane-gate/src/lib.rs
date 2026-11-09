@@ -129,6 +129,7 @@ pub struct Gate {
     publisher: BusPublisher,
     iac_signer_pubkey: String,
     operator_oidc: Option<oidc::OperatorOidc>,
+    edge_auth: Option<edge_auth::EdgeAuth>,
     siem_shipper: Option<Arc<SiemWebhookShipper>>,
     siem_export: Option<Arc<siem_export::SiemExporter>>,
     identity_registry_path: Option<std::path::PathBuf>,
@@ -170,6 +171,7 @@ impl Gate {
             publisher,
             iac_signer_pubkey,
             operator_oidc: None,
+            edge_auth: None,
             siem_shipper: None,
             siem_export: None,
             identity_registry_path: None,
@@ -509,6 +511,7 @@ pub mod audit;
 pub mod crossmint;
 #[cfg(feature = "demo")]
 pub mod demo;
+pub mod edge_auth;
 pub mod github;
 pub mod identity;
 pub mod liveness;

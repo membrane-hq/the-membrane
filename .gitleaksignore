@@ -1,2 +1,3 @@
 ba432906c31d1a39b4dc2c338a16054c18498ebc:membrane-gate/tests/fixtures/oidc-b.pem:private-key:1
 ba432906c31d1a39b4dc2c338a16054c18498ebc:membrane-gate/tests/fixtures/oidc-a.pem:private-key:1
+d2b7351f0ff90e13cb4eb488c04e6f084f6b52c3:deploy/edge/test-keys/edge-test-key.pem:private-key:1

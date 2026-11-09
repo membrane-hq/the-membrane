@@ -34,6 +34,7 @@ The repo also includes a demo of the operator workflow: authorization checks and
 | [docs/signing-key.md](docs/signing-key.md) | Signing-key handling |
 | [docs/approval-gates.md](docs/approval-gates.md) | Holding out-of-scope tool calls for operator approval |
 | [docs/operator-oidc.md](docs/operator-oidc.md) | Operator identity through an IdP (Okta, Entra ID) |
+| [docs/edge-deployment.md](docs/edge-deployment.md) | Edge assertions and the required-path deployment |
 | [docs/operator-dashboard.md](docs/operator-dashboard.md) | Local operator audit dashboard and held-call decisions |
 | [docs/policy-as-code.md](docs/policy-as-code.md) | Channel registry as code: validate, diff, apply |
 | [docs/durable-journal.md](docs/durable-journal.md) | Durable intent journal and upstream reconciliation |
