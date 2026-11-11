@@ -238,6 +238,8 @@ The workspace includes the gate, caller-bound IACs and identity grants, CP recei
 - Code: [AGPL-3.0-only](LICENSE)
 - Documentation and research documents: [CC BY 4.0](LICENSE-CC-BY-4.0)
 
+Commercial licenses are available for use the AGPL does not fit. Contact us at membrane@themembrane.org.
+
 ## Author
 
 Zorie R. Barber
