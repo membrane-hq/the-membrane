@@ -2,6 +2,7 @@ pub mod bus;
 pub mod canonical;
 pub mod event;
 pub mod iac;
+pub mod log_tree;
 pub mod merkle;
 pub mod nostr_bus;
 #[cfg(feature = "ots")]
@@ -18,6 +19,10 @@ pub use event::{EventType, MembraneEvent, MembranePayload, RouterSessionPayload,
 #[cfg(feature = "ots")]
 pub use iac::RollupBundle;
 pub use iac::{IacVerifyError, IntentAuthorizationCredential};
+pub use log_tree::{
+    ConsistencyProof, ConsistencyProofJson, InclusionProof, InclusionProofJson, LogTreeError,
+    OrderedLogTree, SignedTreeHead, LOG_DOMAIN,
+};
 pub use merkle::{Domain, MerkleTree};
 pub use nostr_bus::{
     fetch_membrane_bus_events, fetch_membrane_events, fetch_session_chain_bootstrap,
