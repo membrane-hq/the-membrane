@@ -83,6 +83,8 @@ The Membrane is a research architecture for a **cognitive boundary** — a firew
  - [4.8 Policy Enforcement vs Channel Continuity](#48-policy-enforcement-vs-channel-continuity)
 - [5. Formal Specification](#5-formal-specification)
  - [5.1 Merkle commitment trees](#51-merkle-commitment-trees)
+  - [5.1.1 Set commitment tree](#511-set-commitment-tree)
+  - [5.1.2 Ordered log tree (receipt log)](#512-ordered-log-tree-receipt-log)
 - [6. Security Analysis](#6-security-analysis)
 - [7. Recovery Mechanisms](#7-recovery-mechanisms)
 - [8. Economic and Game-Theoretic Analysis](#8-economic-and-game-theoretic-analysis)
@@ -866,7 +868,23 @@ The Membrane uses **SHA-256 binary Merkle trees** wherever bulk data is committe
 | **Bus** | `H(0x01 \|\| canonical_event_bytes_i)` | `bus_root` in CP public inputs | Node + WoT (recompute from event log) |
 | **CP chain rollup** | `H(0x02 \|\| cp_hash_i)` | `cp_chain_root` in cold-anchor bundle | OTS / Arweave / L2 verifiers |
 
-**Construction:** Sort leaves lexicographically by digest before pairing. Odd leaf count duplicates the last leaf. Inclusion paths need not be published on the bus; STARK circuits prove root correctness from witness chunks.
+The Membrane specifies two constructions. The **set commitment tree** (§5.1.1) is what the trees above use. The **ordered log tree** (§5.1.2) commits to an append-only sequence and carries inclusion and consistency proofs; the receipt log and the roots that cold anchors commit to use it. Byte-level formats, proof encodings and test vectors live in [merkle-trees.md](./merkle-trees.md).
+
+#### 5.1.1 Set commitment tree
+
+**Construction:** Leaf `H(domain_byte || data)` with the prefixes above. Leaves are sorted lexicographically by digest before pairing; an odd leaf count duplicates the last (post-sort maximum) leaf; each parent is `H(min(l, r) || max(l, r))`.
+
+**Guarantee:** the root commits to the *set* of leaves. A verifier holding the same inputs recomputes the same root if and only if the sets match. The root does **not** commit to the exact leaf count (`[a, b, c]` and `[a, b, c, c]` share a root), nor to leaf order, and a leaf digest is not domain-separated from an internal node. These properties are acceptable where the root is verified by full recomputation from the event log (bus root, CP rollup) or inside a STARK over witness chunks (channel, witness trees): the verifier already holds every leaf, so set membership, not sequence, is the property under test. A set root must never be presented as evidence of an exact event count or sequence. Inclusion paths need not be published on the bus; STARK circuits prove root correctness from witness chunks.
+
+#### 5.1.2 Ordered log tree (receipt log)
+
+Where count, order and third-party verifiability matter — the receipt log, and the period roots that cold anchors commit to — the Membrane uses an append-only ordered tree in the style of RFC 6962:
+
+- **Domain separation.** Leaf hash `H(0x00 || LOG_DOMAIN || entry)`; node hash `H(0x01 || LOG_DOMAIN || left || right)`. `LOG_DOMAIN` is the versioned tag `"membrane-log/v1"`: a leaf can never be reinterpreted as an internal node, and a future construction change increments the tag instead of silently altering root semantics.
+- **Construction.** Leaves sit in append order. For n > 1, split at the largest power of two strictly below n and hash the two sub-roots; no leaf is ever duplicated, so the root commits to the exact leaf count and sequence.
+- **Signed tree head.** The log operator signs `(tree_size, root, timestamp)` with the same node key that signs bus events. The signed tree head is the statement verifiers hold; publishing tree heads lets witnesses cross-check them.
+- **Proofs.** Inclusion proofs (audit path from leaf to root) and consistency proofs (an old root is a prefix of the grown tree) follow RFC 6962 §2.1. A third party verifies one receipt against an anchored root without downloading the log.
+- **Anchoring.** The rollup bundle gains a `log_root` (the ordered root over the period's receipts) alongside the existing set-tree `cp_chain_root` during transition; the OTS digest covers both.
 
 **Router context tree:** Ingested prompt/context is chunked (e.g. 4–64 KiB); `context_merkle_root` is the channel-tree root over `H(chunk_j)`. IAC `context_merkle_bound` caps the maximum allowed root.
 
@@ -1511,6 +1529,7 @@ No citation in this document is presented as stronger than its tier.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| v0.9.15 | 2026-11-11 | Split §5.1 into the set commitment tree (§5.1.1, guarantee documented) and the ordered log tree (§5.1.2, RFC 6962-style, versioned domain tag); resolves the leaf-count/order design discussion |
 | v0.9.14 | 2026-06-19 | Păun/Gorla/SN-P lineage (§0.6), BioLLM Class I hybrid, footnotes [^27]–[^30], Liveness-2 formal note, open problem 13 |
 | v0.9.13 | 2026-06-19 | DishBrain/Cortical Labs grounding: closed-loop feedback thesis (§0.2), wetware threat class (A9, Class H), revised §4.6 Liveness-2/stimulation assumptions, IAC fields for `decoder_version`/`stimulation_policy`, open problem 12 |
 | v0.9.12 | 2026-06-14 | Editorial pass: remove redundant required/optional labels; tighten Merkle and anchoring prose |
