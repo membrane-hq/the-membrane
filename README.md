@@ -46,6 +46,7 @@ The repo also includes a demo of the operator workflow: authorization checks and
 | [docs/demo.md](docs/demo.md) | Local product dashboard - one-command demo |
 | [docs/memory-as-policy.md](docs/memory-as-policy.md) | Design direction: memory operations behind the same boundary |
 | [docs/audit-fixes.md](docs/audit-fixes.md) | Enforcement fixes and remaining limits |
+| [docs/merkle-trees.md](docs/merkle-trees.md) | Merkle constructions: set commitments and the ordered receipt log tree |
 | [membrane-hq/membrane-site](https://github.com/membrane-hq/membrane-site) | Public site repository ([themembrane.org](https://themembrane.org)) |
 | [docs/whitepaper.md](docs/whitepaper.md) | Cognitive-boundary research specification (not operator documentation) |
 | [docs/appendix-open-research.md](docs/appendix-open-research.md) | Open-source BCI stacks, security research, Phase 0 path |
