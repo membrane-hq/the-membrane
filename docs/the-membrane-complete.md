@@ -896,7 +896,9 @@ RollupBundle = {
   period_start, period_end,
   cp_chain_root,      // Merkle over CP hashes in period
   last_bus_root,
-  last_cp_hash
+  last_cp_hash,
+  log_root,           // ordered log tree MTH over the period's receipts
+  log_size            // u64 receipt count committed under log_root
 }
 signed_rollup = Sign(subject, canonical_json(RollupBundle))
 ots_digest    = SHA256(canonical_json(RollupBundle) || signature)
@@ -1529,6 +1531,7 @@ No citation in this document is presented as stronger than its tier.
 
 | Version | Date | Notes |
 |---------|------|-------|
+| v0.9.16 | 2026-11-11 | Ordered log tree implemented (`membrane-core::log_tree`: membrane-log/v1 construction, signed tree head, inclusion and consistency proofs, RFC 6962 vectors); RollupBundle gains `log_root`/`log_size` and the OTS digest covers them (§5.1.2); rollup bundle schema 0.9.16 |
 | v0.9.15 | 2026-11-11 | Split §5.1 into the set commitment tree (§5.1.1, guarantee documented) and the ordered log tree (§5.1.2, RFC 6962-style, versioned domain tag); resolves the leaf-count/order design discussion |
 | v0.9.14 | 2026-06-19 | Păun/Gorla/SN-P lineage (§0.6), BioLLM Class I hybrid, footnotes [^27]–[^30], Liveness-2 formal note, open problem 13 |
 | v0.9.13 | 2026-06-19 | DishBrain/Cortical Labs grounding: closed-loop feedback thesis (§0.2), wetware threat class (A9, Class H), revised §4.6 Liveness-2/stimulation assumptions, IAC fields for `decoder_version`/`stimulation_policy`, open problem 12 |

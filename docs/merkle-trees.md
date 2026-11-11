@@ -1,8 +1,11 @@
 # Merkle trees: set commitments and the ordered receipt log
 
-Status: specification. The set commitment tree (§2) is implemented in
-`membrane-core/src/merkle.rs`. The ordered log tree (§3) is specified here and
-lands as code in a follow-up change.
+Status: implemented. The set commitment tree (§2) is implemented in
+`membrane-core/src/merkle.rs`. The ordered log tree (§3) is implemented in
+`membrane-core/src/log_tree.rs` (construction, signed tree head, inclusion and
+consistency proofs) with CLI access via `membrane log`; `RollupBundle` carries
+`log_root`/`log_size` per §3.6 and the §3.7 vectors live in
+`membrane-core/tests/data/log_tree_vectors.json`.
 
 This document resolves the design discussion in
 [issue #62](https://github.com/membrane-hq/the-membrane/issues/62): the sorted,

@@ -101,6 +101,16 @@ pub fn build_rollup_bundle(
         .transpose()?
         .unwrap_or_else(|| "0".repeat(64));
 
+    // Ordered log tree over the period's receipts in append order: each entry
+    // is the event's canonical bytes — the same canonicalization its
+    // signature covers (docs/merkle-trees.md §3.2, §3.6).
+    let receipt_entries: Vec<Vec<u8>> = period_events
+        .iter()
+        .map(|e| e.canonical_bytes())
+        .collect::<Result<_, _>>()
+        .context("canonical receipt bytes")?;
+    let log_tree = crate::log_tree::OrderedLogTree::new(receipt_entries);
+
     Ok(RollupBundle {
         version: RollupBundle::SCHEMA_VERSION.to_string(),
         subject_pubkey: subject_pubkey.to_string(),
@@ -109,6 +119,8 @@ pub fn build_rollup_bundle(
         cp_chain_root,
         last_bus_root,
         last_cp_hash,
+        log_root: log_tree.root_hex(),
+        log_size: log_tree.tree_size(),
     })
 }
 
@@ -118,6 +130,10 @@ pub struct SignedRollupBundle {
     #[serde(flatten)]
     pub bundle: RollupBundle,
     pub signature: String,
+    /// Signed tree head over {log_size, log_root, period_end} (whitepaper
+    /// §5.1.2). Absent for legacy bundles without a log commitment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sth: Option<crate::log_tree::SignedTreeHead>,
 }
 
 #[cfg(feature = "ots")]
@@ -127,9 +143,25 @@ impl SignedRollupBundle {
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         let message = Message::from_digest(digest);
         let sig = keys.sign_schnorr(&message);
+        let sth = if bundle.has_log_commitment() {
+            let root_bytes: [u8; 32] = hex::decode(&bundle.log_root)
+                .context("decode log_root")?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("log_root is not 32 bytes"))?;
+            let timestamp = u64::try_from(bundle.period_end).context("period_end negative")?;
+            Some(crate::log_tree::SignedTreeHead::sign(
+                bundle.log_size,
+                root_bytes,
+                timestamp,
+                keys,
+            ))
+        } else {
+            None
+        };
         Ok(Self {
             bundle,
             signature: hex::encode(sig.serialize()),
+            sth,
         })
     }
 
@@ -167,6 +199,7 @@ pub fn validate_rollup_bundle(bundle: &RollupBundle) -> Result<()> {
         &bundle.cp_chain_root,
         &bundle.last_bus_root,
         &bundle.last_cp_hash,
+        &bundle.log_root,
         &bundle.subject_pubkey,
     ] {
         if field.len() != 64 || !field.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -234,6 +267,8 @@ mod tests {
             cp_chain_root: "11".repeat(64),
             last_bus_root: "22".repeat(64),
             last_cp_hash: "33".repeat(64),
+            log_root: "44".repeat(32),
+            log_size: 3,
         };
         let keys = Keys::generate();
         let signed = SignedRollupBundle::sign(bundle, &keys).unwrap();
@@ -241,5 +276,75 @@ mod tests {
             signed.ots_digest_hex().unwrap(),
             signed.ots_digest_hex().unwrap()
         );
+        // The STH binds {log_size, log_root, period_end} under the node key.
+        let sth = signed.sth.as_ref().expect("sth for committed log");
+        assert_eq!(sth.tree_size, 3);
+        assert_eq!(sth.root, "44".repeat(32));
+        assert_eq!(sth.timestamp, 2);
+        sth.verify(&keys.public_key().to_hex()).unwrap();
+    }
+
+    #[cfg(feature = "ots")]
+    #[test]
+    fn rollup_bundle_carries_ordered_log_commitment() {
+        let events = vec![router_event(100, 1), router_event(101, 2)];
+        let bundle = build_rollup_bundle(&events, &"aa".repeat(32), 0, 200).unwrap();
+        assert!(bundle.has_log_commitment());
+        assert_eq!(bundle.log_size, 2);
+        assert_eq!(bundle.log_root.len(), 64);
+        validate_rollup_bundle(&bundle).unwrap();
+
+        // The log root is the ordered MTH over the events' canonical bytes in
+        // append order, and each receipt proves inclusion.
+        let entries: Vec<Vec<u8>> = events
+            .iter()
+            .map(|e| e.canonical_bytes().unwrap())
+            .collect();
+        let tree = crate::log_tree::OrderedLogTree::new(entries.clone());
+        assert_eq!(bundle.log_root, tree.root_hex());
+        for (i, entry) in entries.iter().enumerate() {
+            let proof = tree.inclusion_proof(i as u64).unwrap();
+            assert!(proof.verify(entry, &tree.root()));
+        }
+
+        // Order matters: reversed receipts commit to a different log root.
+        let reversed = build_rollup_bundle(
+            &[events[1].clone(), events[0].clone()],
+            &"aa".repeat(32),
+            0,
+            200,
+        )
+        .unwrap();
+        assert_ne!(bundle.log_root, reversed.log_root);
+
+        // An empty period commits to the empty ordered tree (log_size 0).
+        let empty = build_rollup_bundle(&[], &"aa".repeat(32), 300, 400).unwrap();
+        assert!(empty.has_log_commitment());
+        assert_eq!(empty.log_size, 0);
+        assert_eq!(
+            empty.log_root,
+            crate::log_tree::OrderedLogTree::new(vec![]).root_hex()
+        );
+    }
+
+    #[cfg(feature = "ots")]
+    #[test]
+    fn legacy_bundle_without_log_fields_deserializes() {
+        let json = serde_json::json!({
+            "version": "0.9.14",
+            "subject_pubkey": "aa".repeat(32),
+            "period_start": 1,
+            "period_end": 2,
+            "cp_chain_root": "11".repeat(64),
+            "last_bus_root": "22".repeat(64),
+            "last_cp_hash": "33".repeat(64),
+        });
+        let bundle: RollupBundle = serde_json::from_value(json).unwrap();
+        assert!(!bundle.has_log_commitment());
+        assert_eq!(bundle.log_size, 0);
+        // No STH is signed for a bundle with no log commitment.
+        let keys = Keys::generate();
+        let signed = SignedRollupBundle::sign(bundle, &keys).unwrap();
+        assert!(signed.sth.is_none());
     }
 }

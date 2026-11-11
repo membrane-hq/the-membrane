@@ -29,6 +29,7 @@ use membrane_gate::{
 };
 
 use membrane_cli::signing_key::SigningKeyArgs;
+use membrane_core::log_tree::{InclusionProof, InclusionProofJson, OrderedLogTree, SignedTreeHead};
 
 mod chat;
 mod config;
@@ -105,6 +106,11 @@ enum Commands {
         relay_url: Option<String>,
         #[arg(long)]
         scope_id: Option<String>,
+    },
+    /// Ordered receipt log tree operations (RFC 6962-style, membrane-log/v1)
+    Log {
+        #[command(subcommand)]
+        command: LogCommands,
     },
     /// Channel registry policy operations (validate, diff, apply)
     Registry {
@@ -220,6 +226,54 @@ enum RegistryCommands {
         /// Live registry file the gate reads
         #[arg(long)]
         to: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum LogCommands {
+    /// Compute the ordered log root over a receipt file (one entry per line;
+    /// each line's raw bytes are one log entry, e.g. canonical receipt JSON)
+    Root {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Produce an RFC 6962 inclusion proof for the entry at --index
+    Prove {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        index: u64,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Verify an inclusion proof (JSON) for --entry-file against --root
+    Verify {
+        #[arg(long)]
+        proof: PathBuf,
+        /// File holding the single receipt entry (trailing newline ignored)
+        #[arg(long)]
+        entry_file: PathBuf,
+        /// Expected tree root (64 hex chars)
+        #[arg(long)]
+        root: String,
+    },
+    /// Sign a tree head (STH) over the receipt file's root and size
+    Sth {
+        #[command(flatten)]
+        nsec: SigningKeyArgs,
+        #[arg(long)]
+        input: PathBuf,
+        /// Unix seconds; defaults to now
+        #[arg(long)]
+        timestamp: Option<u64>,
+    },
+    /// Verify a signed tree head JSON against the operator --pubkey
+    SthVerify {
+        #[arg(long)]
+        input: PathBuf,
+        /// Operator pubkey (64 hex chars)
+        #[arg(long)]
+        pubkey: String,
     },
 }
 
@@ -508,6 +562,21 @@ async fn main() -> Result<()> {
                 work_dir,
                 mock,
             } => rollup_daily(&relay, nsec, day.as_deref(), &work_dir, mock).await,
+        },
+        Commands::Log { command } => match command {
+            LogCommands::Root { input } => log_root(&input),
+            LogCommands::Prove { input, index, out } => log_prove(&input, index, out.as_ref()),
+            LogCommands::Verify {
+                proof,
+                entry_file,
+                root,
+            } => log_verify(&proof, &entry_file, &root),
+            LogCommands::Sth {
+                nsec,
+                input,
+                timestamp,
+            } => log_sth(nsec, &input, timestamp),
+            LogCommands::SthVerify { input, pubkey } => log_sth_verify(&input, &pubkey),
         },
         Commands::Evidence { command } => match command {
             EvidenceCommands::Export {
@@ -1094,6 +1163,8 @@ async fn rollup_stamp(
             "period_end": signed.bundle.period_end,
             "cp_chain_root": signed.bundle.cp_chain_root,
             "last_bus_root": signed.bundle.last_bus_root,
+            "log_root": signed.bundle.log_root,
+            "log_size": signed.bundle.log_size,
         })),
     );
 
@@ -1418,6 +1489,85 @@ fn iac_verify(input: &PathBuf, pubkey: &str) -> Result<()> {
     iac.verify_signature(pubkey)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     println!("IAC signature valid for pubkey {pubkey}");
+    Ok(())
+}
+
+/// Read a receipt file: one entry per line, raw line bytes are the log entry.
+fn read_log_entries(input: &PathBuf) -> Result<Vec<Vec<u8>>> {
+    let text = std::fs::read_to_string(input)
+        .with_context(|| format!("read receipt file {}", input.display()))?;
+    Ok(text.lines().map(|l| l.as_bytes().to_vec()).collect())
+}
+
+fn log_root(input: &PathBuf) -> Result<()> {
+    let tree = OrderedLogTree::new(read_log_entries(input)?);
+    println!("log_root: {}", tree.root_hex());
+    println!("log_size: {}", tree.tree_size());
+    Ok(())
+}
+
+fn log_prove(input: &PathBuf, index: u64, out: Option<&PathBuf>) -> Result<()> {
+    let tree = OrderedLogTree::new(read_log_entries(input)?);
+    let proof = tree
+        .inclusion_proof(index)
+        .with_context(|| format!("index {index} outside tree of size {}", tree.tree_size()))?;
+    let json = serde_json::to_string_pretty(&proof.to_json())?;
+    match out {
+        Some(path) => {
+            std::fs::write(path, &json)?;
+            println!("inclusion proof written to {}", path.display());
+        }
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
+fn log_verify(proof_path: &PathBuf, entry_file: &PathBuf, root_hex: &str) -> Result<()> {
+    let proof_json: InclusionProofJson =
+        serde_json::from_str(&std::fs::read_to_string(proof_path)?).context("parse proof JSON")?;
+    let proof = InclusionProof::from_json(&proof_json)?;
+    let entry_text = std::fs::read_to_string(entry_file)
+        .with_context(|| format!("read entry file {}", entry_file.display()))?;
+    let entry = entry_text
+        .trim_end_matches(['\r', '\n'])
+        .as_bytes()
+        .to_vec();
+    let root_bytes: [u8; 32] = hex::decode(root_hex)
+        .context("root is not hex")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("root must be 64 hex chars"))?;
+    if proof.verify(&entry, &root_bytes) {
+        println!(
+            "OK: entry {} included in tree of size {}",
+            proof.leaf_index, proof.tree_size
+        );
+        Ok(())
+    } else {
+        bail!("proof does not verify against the given root")
+    }
+}
+
+fn log_sth(nsec: SigningKeyArgs, input: &PathBuf, timestamp: Option<u64>) -> Result<()> {
+    let keys = load_keys(nsec)?;
+    let tree = OrderedLogTree::new(read_log_entries(input)?);
+    let ts = match timestamp {
+        Some(ts) => ts,
+        None => u64::try_from(now_secs()).context("system clock before epoch")?,
+    };
+    let sth = SignedTreeHead::sign(tree.tree_size(), tree.root(), ts, &keys);
+    let json = serde_json::to_string_pretty(&sth)?;
+    println!("{json}");
+    Ok(())
+}
+
+fn log_sth_verify(input: &PathBuf, pubkey: &str) -> Result<()> {
+    let sth: SignedTreeHead =
+        serde_json::from_str(&std::fs::read_to_string(input)?).context("parse STH JSON")?;
+    sth.verify(pubkey)?;
+    println!(
+        "OK: STH signature valid for pubkey {pubkey} (tree_size {}, root {})",
+        sth.tree_size, sth.root
+    );
     Ok(())
 }
 

@@ -341,11 +341,35 @@ pub struct RollupBundle {
     pub cp_chain_root: String,
     pub last_bus_root: String,
     pub last_cp_hash: String,
+    /// Ordered log tree root (MTH, membrane-log/v1) over the period's receipt
+    /// entries in append order (whitepaper §5.1.2, docs/merkle-trees.md §3.6).
+    /// Legacy bundles without log fields deserialize with the zero marker,
+    /// which asserts no log commitment.
+    #[serde(default = "RollupBundle::legacy_log_root")]
+    pub log_root: String,
+    /// Ordered log leaf count: the exact number of receipt entries committed
+    /// under `log_root`.
+    #[serde(default)]
+    pub log_size: u64,
 }
 
 #[cfg(feature = "ots")]
 impl RollupBundle {
-    pub const SCHEMA_VERSION: &str = "0.9.14";
+    pub const SCHEMA_VERSION: &str = "0.9.16";
+
+    /// Marker for bundles exported before the ordered log tree existed:
+    /// no log commitment. A real MTH never equals this value in practice.
+    pub const LEGACY_LOG_ROOT: &str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn legacy_log_root() -> String {
+        Self::LEGACY_LOG_ROOT.to_string()
+    }
+
+    /// True when the bundle carries a real ordered-log commitment.
+    pub fn has_log_commitment(&self) -> bool {
+        self.log_root != Self::LEGACY_LOG_ROOT
+    }
 }
 
 #[cfg(test)]
