@@ -27,6 +27,19 @@ compromised caller key. The demo simulates effects and is not a production
 security test. BCI, zk-STARK and TEE components in the research specification are
 not implemented in this repository.
 
+## Merkle commitment guarantees
+
+Two Merkle constructions are in scope (docs/whitepaper.md section 5.1):
+
+- The **set commitment tree** (5.1.1) commits to the set of leaves only. By
+  design it does not commit to exact leaf count or order, and a set root must
+  never be presented as evidence of an exact event count or sequence.
+- The **ordered log tree** (5.1.2) commits to an append-only sequence with
+  inclusion and consistency proofs. Any claim involving count, order or
+  third-party verification must use this tree.
+
+Byte-level details: [docs/merkle-trees.md](docs/merkle-trees.md).
+
 See [enforcement limits](docs/audit-fixes.md),
 [caller identity](docs/caller-identity.md) and
 [durable journal](docs/durable-journal.md) for current assumptions and limits.
