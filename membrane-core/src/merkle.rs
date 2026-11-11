@@ -138,7 +138,7 @@ mod property_tests {
     proptest! {
         /// Set trees are permutation-invariant: the root commits to the set of
         /// leaves, not their arrival order. This is intended behavior (spec
-        /// §5.1 sorts leaves before pairing).
+        /// §5.1.1 sorts leaves before pairing; docs/merkle-trees.md §2).
         #[test]
         fn set_tree_root_is_permutation_invariant(raw in leaf_vec(12)) {
             let leaves: Vec<[u8; 32]> = raw
@@ -187,12 +187,13 @@ mod property_tests {
             prop_assert_ne!(base, MerkleTree::from_prefixed_leaves(leaves).root());
         }
 
-        /// KNOWN LIMITATION, issue #62: an odd leaf count duplicates the last
-        /// leaf, so a root does not commit to the exact leaf count -
-        /// [a, b, c] and [a, b, c, c] collide. Spec §5.1 documents this
-        /// construction. This test pins the current behavior so the eventual
-        /// fix changes it deliberately, not silently. It is not an
-        /// endorsement of the behavior.
+        /// Documented set-tree property (issue #62, resolved as a spec
+        /// decision): an odd leaf count duplicates the maximum leaf, so a
+        /// set root does not commit to the exact leaf count - [a, b, c] and
+        /// [a, b, c, c] collide. Count/order claims belong to the ordered
+        /// log tree (whitepaper §5.1.2, docs/merkle-trees.md §3). This test
+        /// pins the set-tree behavior so any change is deliberate, not
+        /// silent.
         #[test]
         fn known_limitation_odd_leaf_duplication_preserves_root(raw in leaf_vec(12)) {
             let leaves: Vec<[u8; 32]> = raw
@@ -230,8 +231,8 @@ mod property_tests {
 
         /// Ordered (domain-leaf) trees are deterministic and preserve leaf
         /// count. Note: order is only committed across pairs - the pair-sorted
-        /// parent hash makes within-pair swaps invisible (see issue #62), so
-        /// no order-sensitivity property is asserted here.
+        /// parent hash makes within-pair swaps invisible (docs/merkle-trees.md
+        /// §2), so no order-sensitivity property is asserted here.
         #[test]
         fn ordered_tree_is_deterministic(raw in leaf_vec(12)) {
             let first = MerkleTree::from_domain_leaves(Domain::FeatureChunk, &raw);
