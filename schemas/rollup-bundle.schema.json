@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://the-membrane.xyz/schemas/rollup-bundle.schema.json",
   "title": "RollupBundle",
-  "description": "Daily cold-anchor input (whitepaper §5.1)",
+  "description": "Daily cold-anchor input (whitepaper §5.1). log_root/log_size commit to the period's receipts under the ordered log tree (§5.1.2, docs/merkle-trees.md §3.6).",
   "type": "object",
   "required": [
     "version",
@@ -11,13 +11,15 @@
     "period_end",
     "cp_chain_root",
     "last_bus_root",
-    "last_cp_hash"
+    "last_cp_hash",
+    "log_root",
+    "log_size"
   ],
   "additionalProperties": false,
   "properties": {
     "version": {
       "type": "string",
-      "const": "0.9.14"
+      "const": "0.9.16"
     },
     "subject_pubkey": {
       "type": "string",
@@ -36,6 +38,11 @@
     "last_cp_hash": {
       "type": "string",
       "pattern": "^[0-9a-fA-F]{64}$"
-    }
+    },
+    "log_root": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "log_size": { "type": "integer", "minimum": 0 }
   }
 }
