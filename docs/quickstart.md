@@ -12,6 +12,8 @@ export PATH="$PWD/target/debug:$PATH" PILOT_DIR="$(mktemp -d)"
 
 # 2. create operator and caller keys, plus an exact grant for the caller
 cargo run --locked -q -p membrane-cli --example operator-request -- setup "$PILOT_DIR"
+# Bootstrap only this freshly generated test registry.
+membrane registry migrate --to "$PILOT_DIR/registry.yaml"
 export GATE_PUBKEY="$(jq -r .operator_pubkey $PILOT_DIR/keys.json)"
 export CALLER_PUBKEY="$(jq -r .caller_pubkey $PILOT_DIR/keys.json)"
 
@@ -40,6 +42,13 @@ Expected: `200`, then `403` with `caller authentication failed: replay or replay
 Send each signed request within 60 seconds of signing. Each request needs a new proof.
 
 ## Notes
+
+- The initial `registry migrate` records a fresh policy epoch for the generated
+  test registry. It is an explicit trust reset, not a routine production update.
+  Later updates use `registry apply` with an advancing revision; see
+  [policy as code](policy-as-code.md).
+- For an automated check with bounded readiness, assertions and cleanup, use
+  `bash scripts/evaluate-local.sh` ([evaluation notes](agent-evaluation.md)).
 
 - This quickstart runs without a relay. Without one, `iac issue` and `gate start` wait roughly 10 to 20 seconds and log connection errors, then continue. A relay adds receipt publishing, ending sessions and evidence export. To run one locally, use the [operator walkthrough](operator-walkthrough.md).
 - `MEMBRANE_DEV_MOCK_MODEL=1` returns a canned model reply. It is for local checks only.

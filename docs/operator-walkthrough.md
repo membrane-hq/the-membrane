@@ -26,6 +26,8 @@ inheriting earlier severance or chain state. Do not use a public relay for write
 
 ```bash
 cargo run --locked -q -p membrane-cli --example operator-request -- setup "$PILOT_DIR"
+# Record the first accepted generation of this new disposable registry.
+membrane registry migrate --to "$PILOT_DIR/registry.yaml"
 export GATE_PUBKEY="$(jq -r .operator_pubkey "$PILOT_DIR/keys.json")"
 export CALLER_PUBKEY="$(jq -r .caller_pubkey "$PILOT_DIR/keys.json")"
 export NOSTR_NSEC_FILE="$PILOT_DIR/operator.nsec"
@@ -84,9 +86,13 @@ Repeat the identical curl request without signing again. Expect HTTP 403 for
 replayed proof. Send only the IAC header, without a proof: expect HTTP 403 and no
 model dispatch. Do not use `curl -f` when inspecting those expected denials.
 
-For a revocation check, set the exact caller grant's `revoked: true` in the
-scratch registry using a temporary file and atomic rename. Sign again and send:
-expect HTTP 403. Restore the grant only as an explicit operator action.
+For a revocation check, create a candidate with the exact caller grant's
+`revoked: true` and an advancing `revision`, then install it with
+`membrane registry apply candidate.yaml --to "$PILOT_DIR/registry.yaml"`.
+Sign again and send: expect HTTP 403. Directly editing the live file is not a
+revocation test: it fails the accepted-generation check instead. Restore a grant
+only as an explicit operator action through another advancing policy generation.
+See [policy as code](policy-as-code.md).
 
 ## 6. Evidence and cleanup
 
