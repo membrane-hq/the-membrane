@@ -649,6 +649,7 @@ mod tests {
             delta_t_secs: 300,
             model_api_url: None,
             github_repo_allowlist: vec![],
+            deploy_target_allowlist: vec![],
             revision: 0,
         };
         let gate = Gate::new(

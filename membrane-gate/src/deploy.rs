@@ -87,7 +87,9 @@ fn valid_operation_id(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 
-fn valid_target_id(s: &str) -> bool {
+/// A plain inventory ID: lowercase letters, digits, `-` and `_`, starting with a
+/// letter or digit. Aliases, selectors, wildcards and URLs never match.
+pub fn is_valid_target_id(s: &str) -> bool {
     let mut bytes = s.bytes();
     match bytes.next() {
         Some(b) if b.is_ascii_lowercase() || b.is_ascii_digit() => {}
@@ -141,7 +143,7 @@ impl DeployRequest {
                 "targets must be sorted and unique".into(),
             ));
         }
-        if let Some(bad) = self.targets.iter().find(|t| !valid_target_id(t)) {
+        if let Some(bad) = self.targets.iter().find(|t| !is_valid_target_id(t)) {
             return Err(DeployError::InvalidArgs(format!(
                 "target is not a plain inventory ID: {bad}"
             )));
@@ -160,7 +162,7 @@ pub struct TargetInventory {
 impl TargetInventory {
     pub fn new<I: IntoIterator<Item = String>>(ids: I) -> Result<Self, DeployError> {
         let ids: BTreeSet<String> = ids.into_iter().collect();
-        if let Some(bad) = ids.iter().find(|t| !valid_target_id(t)) {
+        if let Some(bad) = ids.iter().find(|t| !is_valid_target_id(t)) {
             return Err(DeployError::InvalidArgs(format!(
                 "inventory ID is not a plain ID: {bad}"
             )));

@@ -18,6 +18,9 @@ pub struct IdentityGrant {
     pub tool_allowlist: Vec<String>,
     #[serde(default)]
     pub github_repo_allowlist: Vec<String>,
+    /// Deploy target IDs this identity may touch; must also be in the registry list.
+    #[serde(default)]
+    pub deploy_target_allowlist: Vec<String>,
     /// Unix seconds. The grant is not usable before this time. Absent means no lower bound.
     #[serde(default)]
     pub not_before: Option<i64>,
@@ -114,6 +117,12 @@ impl IdentityGrant {
         Ok(())
     }
 }
+#[derive(Clone, Copy)]
+enum TargetKind {
+    GithubRepo,
+    DeployTarget,
+}
+
 impl Gate {
     /// Public, per-process challenge binds a proof to this gate lifetime.
     pub fn caller_audience(&self) -> String {
@@ -250,6 +259,30 @@ impl Gate {
     ) -> Result<(), GateError> {
         self.authorize_identity_inner(identity, iac, model, Some(tool_repo), now, true)
     }
+    /// Deploy authorization at a given time. `tool_pre_approved` is true only on
+    /// the resume path after an operator approved this exact request.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_deploy_at(
+        &self,
+        identity: &str,
+        iac: &IntentAuthorizationCredential,
+        model: &str,
+        tool: &str,
+        target: &str,
+        now: i64,
+        tool_pre_approved: bool,
+    ) -> Result<(), GateError> {
+        let snapshot = self.policy_snapshot(identity)?;
+        self.authorize_deploy_with_snapshot(
+            &snapshot,
+            iac,
+            model,
+            tool,
+            target,
+            now,
+            tool_pre_approved,
+        )
+    }
     fn authorize_identity_inner(
         &self,
         identity: &str,
@@ -276,6 +309,48 @@ impl Gate {
         now: i64,
         tool_pre_approved: bool,
     ) -> Result<(), GateError> {
+        self.authorize_target_with_snapshot(
+            snapshot,
+            iac,
+            model,
+            tool_repo.map(|(tool, repo)| (tool, repo, TargetKind::GithubRepo)),
+            now,
+            tool_pre_approved,
+        )
+    }
+
+    /// Same checks for a deploy call: the target must be in both the registry
+    /// and the caller's grant `deploy_target_allowlist`, never a GitHub repo list.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_deploy_with_snapshot(
+        &self,
+        snapshot: &crate::policy_snapshot::PolicySnapshot,
+        iac: &IntentAuthorizationCredential,
+        model: &str,
+        tool: &str,
+        target: &str,
+        now: i64,
+        tool_pre_approved: bool,
+    ) -> Result<(), GateError> {
+        self.authorize_target_with_snapshot(
+            snapshot,
+            iac,
+            model,
+            Some((tool, target, TargetKind::DeployTarget)),
+            now,
+            tool_pre_approved,
+        )
+    }
+
+    fn authorize_target_with_snapshot(
+        &self,
+        snapshot: &crate::policy_snapshot::PolicySnapshot,
+        iac: &IntentAuthorizationCredential,
+        model: &str,
+        tool_target: Option<(&str, &str, TargetKind)>,
+        now: i64,
+        tool_pre_approved: bool,
+    ) -> Result<(), GateError> {
         let registry = &snapshot.live;
         let grant = &snapshot.grant;
         if grant.revoked {
@@ -298,16 +373,25 @@ impl Gate {
         {
             return Err(GateError::ModelDenied(model.into()));
         }
-        if let Some((tool, repo)) = tool_repo {
+        if let Some((tool, target, kind)) = tool_target {
             if !tool_pre_approved
                 && (!iac.tool_allowed(tool) || !grant.tool_allowlist.iter().any(|t| t == tool))
             {
                 return Err(GateError::ToolDenied(tool.into()));
             }
-            if !registry.github_repo_allowlist.iter().any(|r| r == repo)
-                || !grant.github_repo_allowlist.iter().any(|r| r == repo)
+            let (registry_list, grant_list) = match kind {
+                TargetKind::GithubRepo => (
+                    &registry.github_repo_allowlist,
+                    &grant.github_repo_allowlist,
+                ),
+                TargetKind::DeployTarget => (
+                    &registry.deploy_target_allowlist,
+                    &grant.deploy_target_allowlist,
+                ),
+            };
+            if !registry_list.iter().any(|r| r == target) || !grant_list.iter().any(|r| r == target)
             {
-                return Err(GateError::RepoDenied(repo.into()));
+                return Err(GateError::RepoDenied(target.into()));
             }
         }
         Ok(())
@@ -340,6 +424,7 @@ mod tests {
             model_allowlist: vec!["m".into()],
             tool_allowlist: vec!["github.comment".into()],
             github_repo_allowlist: vec!["a/b".into()],
+            deploy_target_allowlist: vec![],
             not_before: None,
             expires_at: None,
             valid_for: None,
@@ -354,6 +439,7 @@ mod tests {
             delta_t_secs: 300,
             model_api_url: None,
             github_repo_allowlist: vec!["a/b".into()],
+            deploy_target_allowlist: vec![],
             revision: 0,
         };
         (
@@ -393,6 +479,35 @@ mod tests {
             &serde_json::json!({"tool":"github.comment"}),
             now,
         )
+    }
+    #[test]
+    fn deploy_target_needs_both_lists_and_never_borrows_repo_lists() {
+        let (mut g, c, mut i) = fixture();
+        i.tool_allowlist = vec!["deploy.apply".into()];
+        let id = c.public_key().to_hex();
+        // "a/b" is an allowed GitHub repo, but not a deploy target.
+        assert!(g
+            .authorize_deploy_at(&id, &i, "m", "deploy.apply", "a/b", 100, true)
+            .is_err());
+        assert!(g
+            .authorize_deploy_at(&id, &i, "m", "deploy.apply", "stage-1", 100, true)
+            .is_err());
+        // Registry only: still denied.
+        g.registry.deploy_target_allowlist = vec!["stage-1".into()];
+        assert!(g
+            .authorize_deploy_at(&id, &i, "m", "deploy.apply", "stage-1", 100, true)
+            .is_err());
+        // Both lists: allowed. A sibling target stays denied.
+        g.registry
+            .identities
+            .get_mut(&id)
+            .unwrap()
+            .deploy_target_allowlist = vec!["stage-1".into()];
+        g.authorize_deploy_at(&id, &i, "m", "deploy.apply", "stage-1", 100, true)
+            .unwrap();
+        assert!(g
+            .authorize_deploy_at(&id, &i, "m", "deploy.apply", "stage-2", 100, true)
+            .is_err());
     }
     #[test]
     fn valid_distinct_caller_and_operator_then_replay_denied() {
