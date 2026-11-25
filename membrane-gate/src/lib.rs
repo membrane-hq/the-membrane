@@ -511,6 +511,7 @@ pub mod audit;
 pub mod crossmint;
 #[cfg(feature = "demo")]
 pub mod demo;
+pub mod deploy;
 pub mod edge_auth;
 pub mod github;
 pub mod identity;
