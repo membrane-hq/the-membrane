@@ -208,6 +208,7 @@ pub fn demo_registry() -> crate::ChannelRegistry {
         model_api_url: None,
         // Demo tool effects stay simulated; the GitHub connector is not enabled.
         github_repo_allowlist: vec![],
+        deploy_target_allowlist: vec![],
         revision: 0,
     }
 }

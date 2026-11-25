@@ -1645,6 +1645,7 @@ mod tool_invoke_policy_tests {
                     model_allowlist: vec!["demo".into()],
                     tool_allowlist: tools.clone(),
                     github_repo_allowlist: repos.clone(),
+                    deploy_target_allowlist: vec![],
                     not_before: None,
                     expires_at: None,
                     valid_for: None,
@@ -1662,6 +1663,7 @@ mod tool_invoke_policy_tests {
             delta_t_secs: 300,
             model_api_url: None,
             github_repo_allowlist: repos.clone(),
+            deploy_target_allowlist: vec![],
             revision: 0,
         };
         let publisher = BusPublisher::new(BusPublisherConfig {

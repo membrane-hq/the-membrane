@@ -88,7 +88,7 @@ fn sorted(list: &[String]) -> Vec<String> {
 }
 
 fn globals_view(registry: &ChannelRegistry) -> serde_json::Value {
-    json!({
+    let mut view = json!({
         "permitted_channels": sorted(&registry.permitted_channels),
         "forbidden_exports": sorted(&registry.forbidden_exports),
         "model_allowlist": sorted(&registry.model_allowlist),
@@ -98,11 +98,16 @@ fn globals_view(registry: &ChannelRegistry) -> serde_json::Value {
             "holdable_tools": sorted(&policy.holdable_tools),
             "ttl_secs": policy.ttl_secs,
         })),
-    })
+    });
+    // Present only when set, so the digest of every existing policy is unchanged.
+    if !registry.deploy_target_allowlist.is_empty() {
+        view["deploy_target_allowlist"] = json!(sorted(&registry.deploy_target_allowlist));
+    }
+    view
 }
 
 fn grant_view(grant: &IdentityGrant) -> serde_json::Value {
-    json!({
+    let mut view = json!({
         "revoked": grant.revoked,
         "scopes": sorted(&grant.scopes),
         "permitted_channels": sorted(&grant.permitted_channels),
@@ -113,7 +118,12 @@ fn grant_view(grant: &IdentityGrant) -> serde_json::Value {
         "expires_at": grant.expires_at,
         "valid_for": grant.valid_for,
         "spend": grant.spend,
-    })
+    });
+    // Present only when set, so the digest of every existing policy is unchanged.
+    if !grant.deploy_target_allowlist.is_empty() {
+        view["deploy_target_allowlist"] = json!(sorted(&grant.deploy_target_allowlist));
+    }
+    view
 }
 
 /// sha256 over the canonical effective policy for one caller: the accepted
@@ -215,6 +225,7 @@ mod tests {
             model_allowlist: vec!["m".into()],
             tool_allowlist: vec!["github.comment".into()],
             github_repo_allowlist: vec!["a/b".into()],
+            deploy_target_allowlist: vec![],
             not_before: None,
             expires_at: None,
             valid_for: None,
@@ -242,6 +253,7 @@ mod tests {
             delta_t_secs: 300,
             model_api_url: None,
             github_repo_allowlist: vec!["a/b".into()],
+            deploy_target_allowlist: vec![],
             revision: 0,
         }
     }

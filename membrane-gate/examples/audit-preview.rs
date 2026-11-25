@@ -16,6 +16,7 @@ async fn main() -> anyhow::Result<()> {
         delta_t_secs: 300,
         model_api_url: None,
         github_repo_allowlist: vec!["acme/pilot".into()],
+        deploy_target_allowlist: vec![],
         revision: 0,
     };
     let keys = nostr::Keys::generate();

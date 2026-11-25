@@ -30,6 +30,7 @@ const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "llama_cpp_url",
     "ollama_url",
     "github_repo_allowlist",
+    "deploy_target_allowlist",
     "approval",
     "revision",
 ];
@@ -110,6 +111,18 @@ pub fn validate_registry(registry: &ChannelRegistry) -> ValidationReport {
         "github_repo_allowlist",
         &registry.github_repo_allowlist,
     );
+    warn_duplicates(
+        &mut report,
+        "deploy_target_allowlist",
+        &registry.deploy_target_allowlist,
+    );
+    for target in &registry.deploy_target_allowlist {
+        if !crate::deploy::is_valid_target_id(target) {
+            report.error(format!(
+                "deploy_target_allowlist entry `{target}` is not a plain target ID"
+            ));
+        }
+    }
 
     if registry.model_allowlist.is_empty() {
         report.warn("model_allowlist is empty: the gate refuses every model call");
@@ -241,6 +254,18 @@ fn validate_identity(
         }
     }
 
+    for target in &grant.deploy_target_allowlist {
+        if !crate::deploy::is_valid_target_id(target) {
+            report.error(format!(
+                "identity `{id}` deploy_target_allowlist entry `{target}` is not a plain target ID"
+            ));
+        } else if !registry.deploy_target_allowlist.contains(target) {
+            report.error(format!(
+                "identity `{id}` allows deploy target `{target}`, which is not in the registry deploy_target_allowlist; the gate refuses it"
+            ));
+        }
+    }
+
     if let Some(spend) = &grant.spend {
         if spend.budget.trim().is_empty() {
             report.error(format!(
@@ -269,6 +294,12 @@ fn validate_identity(
         &id,
         "github_repo_allowlist",
         &grant.github_repo_allowlist,
+    );
+    warn_duplicates_grant(
+        report,
+        &id,
+        "deploy_target_allowlist",
+        &grant.deploy_target_allowlist,
     );
 }
 
@@ -350,6 +381,12 @@ pub fn diff_registries(old: &ChannelRegistry, new: &ChannelRegistry) -> Registry
         "github_repo_allowlist",
         &old.github_repo_allowlist,
         &new.github_repo_allowlist,
+    );
+    push_list_change(
+        &mut diff.registry_changed,
+        "deploy_target_allowlist",
+        &old.deploy_target_allowlist,
+        &new.deploy_target_allowlist,
     );
     push_scalar_change(
         &mut diff.registry_changed,
@@ -437,6 +474,12 @@ fn diff_grant(old: &IdentityGrant, new: &IdentityGrant) -> Vec<FieldChange> {
         "github_repo_allowlist",
         &old.github_repo_allowlist,
         &new.github_repo_allowlist,
+    );
+    push_list_change(
+        &mut changes,
+        "deploy_target_allowlist",
+        &old.deploy_target_allowlist,
+        &new.deploy_target_allowlist,
     );
     if old.not_before != new.not_before {
         changes.push(FieldChange {

@@ -75,6 +75,10 @@ pub struct ChannelRegistry {
     /// Explicit `owner/name` repos the GitHub connector may touch. Empty = deny all.
     #[serde(default)]
     pub github_repo_allowlist: Vec<String>,
+    /// Exact deploy target IDs `deploy.apply` / `deploy.remove` may touch. Empty
+    /// = deny all. Kept separate from GitHub repos on purpose.
+    #[serde(default)]
+    pub deploy_target_allowlist: Vec<String>,
     /// Approval gates. Absent means out-of-scope tool calls are blocked, never held.
     #[serde(default)]
     pub approval: Option<approval::ApprovalPolicy>,
@@ -559,6 +563,7 @@ mod tests {
             delta_t_secs: delta_t,
             model_api_url: None,
             github_repo_allowlist: vec![],
+            deploy_target_allowlist: vec![],
             revision: 0,
         };
         let publisher = BusPublisher::new(BusPublisherConfig {
@@ -623,6 +628,7 @@ mod tests {
             delta_t_secs: 300,
             model_api_url: None,
             github_repo_allowlist: vec!["acme/pilot".into()],
+            deploy_target_allowlist: vec![],
             revision: 0,
         };
         let publisher = BusPublisher::new(BusPublisherConfig {
