@@ -19,8 +19,19 @@ pub async fn reconcile(state: &GateServerState) -> Result<Value, GateError> {
             evidence,
         })?;
     }
+    // No deploy observer exists yet, so a deploy operation can only be marked
+    // for operator review. It is never retried or cleared here.
+    for operation in state.operations.unresolved_deploys()? {
+        if operation.state == "operator_review" {
+            continue;
+        }
+        state.operations.append(Record::Review {
+            key: operation.key,
+            evidence: json!({"observation":"unverifiable", "reason":"no_deploy_observer"}),
+        })?;
+    }
     Ok(
-        json!({"operations":state.operations.unresolved()?, "legacy_reservations":state.operations.legacy_reservations()?, "spend_open":spend_open(state)?, "automatic_retry":false}),
+        json!({"operations":state.operations.unresolved()?, "deploy_operations":state.operations.unresolved_deploys()?, "legacy_reservations":state.operations.legacy_reservations()?, "spend_open":spend_open(state)?, "automatic_retry":false}),
     )
 }
 /// Spend reservations still holding budget. Reported only; never retried or
@@ -39,7 +50,7 @@ pub async fn list(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let _chain = state.session_chain.lock().await;
     Ok(Json(
-        json!({"operations":state.operations.unresolved().map_err(error)?, "legacy_reservations":state.operations.legacy_reservations().map_err(error)?, "spend_open":spend_open(&state).map_err(error)?, "automatic_retry":false}),
+        json!({"operations":state.operations.unresolved().map_err(error)?, "deploy_operations":state.operations.unresolved_deploys().map_err(error)?, "legacy_reservations":state.operations.legacy_reservations().map_err(error)?, "spend_open":spend_open(&state).map_err(error)?, "automatic_retry":false}),
     ))
 }
 pub async fn run(

@@ -144,15 +144,17 @@ async fn health(State(state): State<GateServerState>) -> impl IntoResponse {
     let degraded_scope = chain.degraded_scope_id.clone();
 
     let journal = state.operations.unresolved();
+    let deploy_journal = state.operations.unresolved_deploys();
     let recovery = state.operations.recover(&state.gate.publisher_pubkey_hex());
     let journal_blocked = recovery
         .as_ref()
         .map(|r| !r.pending.is_empty())
         .unwrap_or(true);
     Json(json!({
-        "journal_available": journal.is_ok() && recovery.is_ok(),
+        "journal_available": journal.is_ok() && deploy_journal.is_ok() && recovery.is_ok(),
         "journal_dispatch_blocked": journal_blocked,
         "unresolved_operations": journal.as_ref().map(|v| v.len()).ok(),
+        "unresolved_deploy_operations": deploy_journal.as_ref().map(|v| v.len()).ok(),
         "status": if router_stale || degraded_scope.is_some() || journal_blocked { "degraded" } else { "ok" },
         "gate": "membrane-phase-0",
         "caller_audience": state.gate.caller_audience(),

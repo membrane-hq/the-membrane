@@ -1,5 +1,5 @@
 //! Single-instance, append-only journal. Corrupt/torn records block the gate.
-use crate::{github::ToolInvokeRequest, GateError};
+use crate::{deploy::DeployRequest, github::ToolInvokeRequest, GateError};
 use membrane_core::{event::MembraneEvent, SessionChainState};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,6 +21,15 @@ pub enum Record {
         caller: String,
         scope: String,
         request: ToolInvokeRequest,
+    },
+    /// A reserved `deploy.apply` / `deploy.remove`. Same key space and lifecycle
+    /// as `Intent`; kept as its own variant so older journals and GitHub
+    /// reconciliation are untouched.
+    DeployIntent {
+        key: String,
+        caller: String,
+        scope: String,
+        request: DeployRequest,
     },
     Outcome {
         key: String,
@@ -62,6 +71,15 @@ pub struct UnresolvedOperation {
     pub scope: String,
     pub state: String,
     pub request: ToolInvokeRequest,
+    pub evidence: Option<serde_json::Value>,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct UnresolvedDeploy {
+    pub key: String,
+    pub caller: String,
+    pub scope: String,
+    pub state: String,
+    pub request: DeployRequest,
     pub evidence: Option<serde_json::Value>,
 }
 #[derive(Default)]
@@ -207,13 +225,45 @@ impl OperationJournal {
         if self.path.join(format!("{key}.jsonl")).exists()
             || records
                 .iter()
-                .any(|r| matches!(r, Record::Intent { key: k, .. } if k == &key))
+                .any(|r| matches!(r, Record::Intent { key: k, .. } | Record::DeployIntent { key: k, .. } if k == &key))
         {
             return Err(failure(
                 "operation already reserved; never automatically retry",
             ));
         }
         self.append_inner(Record::Intent {
+            key: key.clone(),
+            caller: caller.into(),
+            scope: scope.into(),
+            request: req.clone(),
+        })?;
+        Ok(self.path.join(key))
+    }
+    /// Durably reserve a deploy operation before dispatch. The key is
+    /// (caller, operation_id), the same key space as `reserve_in_scope`, so one
+    /// operation ID can never be reused across tools by the same caller.
+    pub fn reserve_deploy_in_scope(
+        &self,
+        caller: &str,
+        scope: &str,
+        req: &DeployRequest,
+    ) -> Result<PathBuf, GateError> {
+        let _writer = self.writer.lock().map_err(|_| failure("poisoned writer"))?;
+        if req.operation_id.trim().is_empty() || req.operation_id.len() > 128 {
+            return Err(failure("deploy requires operation_id (1-128 bytes)"));
+        }
+        let key = digest(&(caller, req.operation_id.as_str()))?;
+        let records = self.records_inner()?;
+        if self.path.join(format!("{key}.jsonl")).exists()
+            || records.iter().any(|r| {
+                matches!(r, Record::Intent { key: k, .. } | Record::DeployIntent { key: k, .. } if k == &key)
+            })
+        {
+            return Err(failure(
+                "operation already reserved; never automatically retry",
+            ));
+        }
+        self.append_inner(Record::DeployIntent {
             key: key.clone(),
             caller: caller.into(),
             scope: scope.into(),
@@ -229,7 +279,7 @@ impl OperationJournal {
             .and_then(|s| s.to_str())
             .ok_or_else(|| failure("invalid operation key"))?
             .to_string();
-        if !self.unresolved()?.iter().any(|op| op.key == key) {
+        if !self.is_unresolved(&key)? {
             return Err(failure("refused outcome missing unresolved intent"));
         }
         self.append(Record::Outcome {
@@ -243,7 +293,7 @@ impl OperationJournal {
             .and_then(|s| s.to_str())
             .ok_or_else(|| failure("invalid operation key"))?
             .to_string();
-        if !self.unresolved()?.iter().any(|op| op.key == key) {
+        if !self.is_unresolved(&key)? {
             return Err(failure("outcome missing unresolved intent"));
         }
         self.append(Record::Outcome {
@@ -251,8 +301,21 @@ impl OperationJournal {
             state: if success { "completed" } else { "uncertain" }.into(),
         })
     }
+    fn is_unresolved(&self, key: &str) -> Result<bool, GateError> {
+        let (tools, deploys) = self.ledger()?;
+        Ok(tools.iter().any(|op| op.key == key) || deploys.iter().any(|op| op.key == key))
+    }
     pub fn unresolved(&self) -> Result<Vec<UnresolvedOperation>, GateError> {
+        Ok(self.ledger()?.0)
+    }
+    /// Unresolved deploy operations. Reconciliation never retries them; an
+    /// uncertain write stays reserved until read-only evidence is reviewed.
+    pub fn unresolved_deploys(&self) -> Result<Vec<UnresolvedDeploy>, GateError> {
+        Ok(self.ledger()?.1)
+    }
+    fn ledger(&self) -> Result<(Vec<UnresolvedOperation>, Vec<UnresolvedDeploy>), GateError> {
         let mut operations = BTreeMap::new();
+        let mut deploys = BTreeMap::new();
         for record in self.records()? {
             match record {
                 Record::Intent {
@@ -273,26 +336,55 @@ impl OperationJournal {
                         },
                     );
                 }
+                Record::DeployIntent {
+                    key,
+                    caller,
+                    scope,
+                    request,
+                } => {
+                    deploys.insert(
+                        key.clone(),
+                        UnresolvedDeploy {
+                            key,
+                            caller,
+                            scope,
+                            request,
+                            state: "reserved".into(),
+                            evidence: None,
+                        },
+                    );
+                }
                 Record::Outcome { key, state } => {
-                    let op = operations
-                        .get_mut(&key)
-                        .ok_or_else(|| failure("outcome without intent"))?;
-                    op.state = state;
+                    if let Some(op) = operations.get_mut(&key) {
+                        op.state = state;
+                    } else if let Some(op) = deploys.get_mut(&key) {
+                        op.state = state;
+                    } else {
+                        return Err(failure("outcome without intent"));
+                    }
                 }
                 Record::Review { key, evidence } => {
-                    let op = operations
-                        .get_mut(&key)
-                        .ok_or_else(|| failure("review without intent"))?;
-                    op.state = "operator_review".into();
-                    op.evidence = Some(evidence);
+                    if let Some(op) = operations.get_mut(&key) {
+                        op.state = "operator_review".into();
+                        op.evidence = Some(evidence);
+                    } else if let Some(op) = deploys.get_mut(&key) {
+                        op.state = "operator_review".into();
+                        op.evidence = Some(evidence);
+                    } else {
+                        return Err(failure("review without intent"));
+                    }
                 }
                 _ => {}
             }
         }
-        Ok(operations
-            .into_values()
-            .filter(|o| !matches!(o.state.as_str(), "completed" | "refused"))
-            .collect())
+        let open = |s: &str| !matches!(s, "completed" | "refused");
+        Ok((
+            operations
+                .into_values()
+                .filter(|o| open(&o.state))
+                .collect(),
+            deploys.into_values().filter(|o| open(&o.state)).collect(),
+        ))
     }
     pub fn recover(&self, operator: &str) -> Result<Recovery, GateError> {
         use membrane_core::{event::MembranePayload, rollup::cp_hash_hex};
@@ -586,6 +678,81 @@ mod tests {
         assert!(j.finish_refused(&path).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
+    fn deploy_request(op: &str) -> DeployRequest {
+        DeployRequest {
+            schema_version: crate::deploy::DEPLOY_SCHEMA_VERSION,
+            tool: crate::deploy::TOOL_DEPLOY_APPLY.into(),
+            operation_id: op.into(),
+            model: "client-1".into(),
+            artifact_sha256: "c".repeat(64),
+            targets: vec!["target-a".into()],
+            expected_prior_state_sha256: "a".repeat(64),
+            test_report_sha256: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn deploy_reservation_blocks_duplicates_across_restart_and_tools() {
+        let path = directory();
+        let j = OperationJournal::new(path.clone());
+        let req = deploy_request("deploy-op-1");
+        let key = j.reserve_deploy_in_scope("caller", "scope", &req).unwrap();
+        // Same caller and operation ID: refused, including after a changed body.
+        assert!(j.reserve_deploy_in_scope("caller", "scope", &req).is_err());
+        let mut changed = req.clone();
+        changed.targets = vec!["target-b".into()];
+        assert!(j
+            .reserve_deploy_in_scope("caller", "scope", &changed)
+            .is_err());
+        // The same operation ID cannot be reused through the GitHub path either.
+        let mut gh = request();
+        gh.operation_id = Some("deploy-op-1".into());
+        assert!(j.reserve_in_scope("caller", "scope", &gh).is_err());
+        // Another caller has its own key space.
+        assert!(j
+            .reserve_deploy_in_scope("other-caller", "scope", &req)
+            .is_ok());
+        // An uncertain outcome stays unresolved and reserved across a restart.
+        j.finish(&key, false).unwrap();
+        drop(j);
+        let j = OperationJournal::new(path.clone());
+        assert!(j.reserve_deploy_in_scope("caller", "scope", &req).is_err());
+        let open = j.unresolved_deploys().unwrap();
+        assert_eq!(open.len(), 2);
+        assert!(open.iter().any(|o| o.state == "uncertain"));
+        // GitHub reconciliation never sees deploy operations.
+        assert!(j.unresolved().unwrap().is_empty());
+        drop(j);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn deploy_refused_before_dispatch_closes_and_review_is_recorded() {
+        let path = directory();
+        let j = OperationJournal::new(path.clone());
+        let a = j
+            .reserve_deploy_in_scope("caller", "scope", &deploy_request("op-a"))
+            .unwrap();
+        j.finish_refused(&a).unwrap();
+        assert!(j.unresolved_deploys().unwrap().is_empty());
+        assert!(j.finish_refused(&a).is_err());
+        let b = j
+            .reserve_deploy_in_scope("caller", "scope", &deploy_request("op-b"))
+            .unwrap();
+        j.append(Record::Review {
+            key: b.file_name().unwrap().to_str().unwrap().into(),
+            evidence: serde_json::json!({"observation":"unverifiable"}),
+        })
+        .unwrap();
+        let open = j.unresolved_deploys().unwrap();
+        assert_eq!(open[0].state, "operator_review");
+        assert!(j
+            .reserve_deploy_in_scope("caller", "scope", &deploy_request(""))
+            .is_err());
+        drop(j);
+        fs::remove_dir_all(path).unwrap();
+    }
+
     #[test]
     fn second_instance_is_excluded_and_lock_releases_on_drop() {
         let path = directory();
