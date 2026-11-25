@@ -24,7 +24,9 @@ assert '  actions: read\n' in cold
 for forbidden in ('docker build ', 'docker push ', 'TESTED_GATE_IMAGE=',
                   'inputs.publish', 'inputs.install_tested', 'packages: write'):
     assert forbidden not in cold, forbidden
-assert cold.index('      - uses: docker/login-action@v3') < cold.index(
+login = re.search(r'      - uses: docker/login-action@v\d+', cold)
+assert login, 'docker/login-action step missing'
+assert login.start() < cold.index(
     '      - name: Resolve and cold-pull') < cold.index('      - name: Start the pilot stack')
 assert 'resolve-tested-image.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA" --provenance-json' in cold
 assert 'pull-tested-image.sh "$GITHUB_REPOSITORY" "$REF"' in cold
