@@ -7,11 +7,11 @@
 //!
 //! This slice covers request validation, the content-addressed artifact store
 //! with byte re-verification at dispatch, the trusted target inventory and the
-//! connector preflight/execute path. It is not yet wired into the server
-//! handler, the approval hold or the operations journal. Those are later
-//! slices, so nothing here can be reached over HTTP. No executor ships in this
-//! slice; the tests use a recording stand-in, which cannot satisfy the
-//! acceptance bar (a real local write on a disposable target).
+//! connector preflight/execute path. Slice 2b-2 wires the connector into the
+//! production `/v1/deploy/invoke` route with the approval hold, durable
+//! reservation and pre-dispatch recheck. No real executor ships yet; the tests
+//! use a recording stand-in, which cannot satisfy the acceptance bar (a real
+//! local write on a disposable target).
 
 use std::{
     collections::BTreeSet,
@@ -302,6 +302,18 @@ impl DeployConnector {
         Ok(())
     }
 
+    /// Pre-dispatch re-verification: everything `preflight` checks, plus
+    /// hashing the staged artifact bytes again. The route runs this after the
+    /// intent receipt is published, immediately before dispatch, so bytes
+    /// swapped behind an approved digest refuse the call instead of deploying.
+    pub fn reverify(&self, req: &DeployRequest) -> Result<(), DeployError> {
+        self.preflight(req)?;
+        if req.tool == TOOL_DEPLOY_APPLY {
+            self.store.read_verified(&req.artifact_sha256)?;
+        }
+        Ok(())
+    }
+
     /// Caller must already have passed gate authorization and an exact approval.
     /// Approval waives only the tool check: this still re-hashes the artifact.
     pub fn execute(&self, req: &DeployRequest) -> Result<DeployReceiptContext, DeployError> {
@@ -572,6 +584,23 @@ mod tests {
         assert_eq!(f.exec.applies.load(Ordering::SeqCst), 0);
         // The apply approval hash does not match the remove request.
         assert_ne!(hash(&r), hash(&request(&f.digest)));
+    }
+
+    #[test]
+    fn reverify_hashes_bytes_without_touching_the_executor() {
+        let f = fixture("reverify");
+        f.connector.reverify(&request(&f.digest)).unwrap();
+        assert_eq!(calls(&f), 0);
+        fs::write(f.store.root().join(&f.digest), b"evil-bytes").unwrap();
+        assert!(matches!(
+            f.connector.reverify(&request(&f.digest)),
+            Err(DeployError::ArtifactDigestMismatch(_))
+        ));
+        assert_eq!(calls(&f), 0);
+        // remove has no staged bytes to re-hash; shape and inventory still apply.
+        let mut r = request(&f.digest);
+        r.tool = TOOL_DEPLOY_REMOVE.into();
+        f.connector.reverify(&r).unwrap();
     }
 
     #[test]
