@@ -1353,6 +1353,7 @@ dependencies = [
  "hex",
  "jsonwebtoken",
  "membrane-core",
+ "membrane-proof-target",
  "nostr",
  "rcgen",
  "reqwest",
@@ -1366,6 +1367,18 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "membrane-proof-target"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
 ]
 
 [[package]]

@@ -999,14 +999,46 @@ async fn gate_start(
         session_chain: Arc::new(tokio::sync::Mutex::new(session_chain)),
         operations,
         github: Arc::new(GitHubConnector::new(github_cfg)),
-        // No real deploy executor ships yet, so deploy calls fail closed.
-        deploy: None,
+        deploy: deploy_connector_from_env()?,
         audit: Arc::new(membrane_gate::audit::AuditLog::default()),
         spend: membrane_gate::routstr::SpendService::from_env()?.map(Arc::new),
         approvals,
     };
 
     run_gate_server(state, listen).await
+}
+
+/// Deploy connector wiring from trusted operator configuration. Targets and
+/// the artifact store come from env, never from callers. Both or neither must
+/// be set; with neither, deploy calls fail closed.
+fn deploy_connector_from_env() -> anyhow::Result<Option<Arc<membrane_gate::deploy::DeployConnector>>>
+{
+    use membrane_gate::deploy::{
+        ArtifactStore, DeployConnector, HttpPolicyExecutor, TargetEndpoints,
+    };
+    let targets = std::env::var("MEMBRANE_DEPLOY_TARGETS").ok();
+    let store_dir = std::env::var("MEMBRANE_DEPLOY_ARTIFACT_STORE").ok();
+    match (targets, store_dir) {
+        (Some(targets), Some(store_dir)) => {
+            let (inventory, endpoints) =
+                TargetEndpoints::parse(&targets).map_err(anyhow::Error::msg)?;
+            let store = ArtifactStore::open(&store_dir).map_err(anyhow::Error::msg)?;
+            let executor = HttpPolicyExecutor::new(endpoints).map_err(anyhow::Error::msg)?;
+            println!("gate: deploy connector targets=[{targets}] store={store_dir}");
+            Ok(Some(Arc::new(DeployConnector::new(
+                inventory,
+                store,
+                Arc::new(executor),
+            ))))
+        }
+        (None, None) => {
+            println!("gate: no deploy connector configured - deploy invokes fail closed");
+            Ok(None)
+        }
+        _ => bail!(
+            "deploy connector needs both MEMBRANE_DEPLOY_TARGETS (id=url,...) and MEMBRANE_DEPLOY_ARTIFACT_STORE (dir)"
+        ),
+    }
 }
 
 async fn evidence_export(

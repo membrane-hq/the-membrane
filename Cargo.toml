@@ -6,6 +6,7 @@ members = [
     "membrane-cli",
     "membrane-dashboard",
     "membrane-advisor",
+    "membrane-proof-target",
 ]
 default-members = ["membrane-cli"]
 
@@ -39,3 +40,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 membrane-core = { path = "membrane-core" }
 membrane-gate = { path = "membrane-gate" }
+membrane-proof-target = { path = "membrane-proof-target" }
