@@ -1621,11 +1621,28 @@ async fn handle_deploy_invoke(
         state.operations.finish_refused(&reservation)?;
         return Err(err);
     }
-    *authorized = true;
-    record_allowed(state, &iac, "deploy");
-    let execution = connector.execute(req);
-    state.operations.finish(&reservation, execution.is_ok())?;
-    let tool_ctx = execution.map_err(map_deploy_err)?;
+    let tool_ctx = match connector.execute(req).await {
+        Ok(tool_ctx) => {
+            *authorized = true;
+            record_allowed(state, &iac, "deploy");
+            state.operations.finish(&reservation, true)?;
+            tool_ctx
+        }
+        Err(err) if err.pre_write() => {
+            // Refused before any write to the target: close the reservation
+            // as refused. Nothing ran, so there is nothing to reconcile.
+            state.operations.finish_refused(&reservation)?;
+            return Err(map_deploy_err(err));
+        }
+        Err(err) => {
+            // The write may have reached the target: count the dispatch, close
+            // the reservation as failed and surface the uncertainty.
+            *authorized = true;
+            record_allowed(state, &iac, "deploy");
+            state.operations.finish(&reservation, false)?;
+            return Err(map_deploy_err(err));
+        }
+    };
 
     info!(
         scope_id = %iac.scope_id,
@@ -1764,7 +1781,11 @@ fn map_deploy_err(err: crate::deploy::DeployError) -> GateError {
         DeployError::ArtifactMissing(_)
         | DeployError::ArtifactDigestMismatch(_)
         | DeployError::Store(_)
-        | DeployError::Executor(_) => GateError::Connector(err.to_string()),
+        | DeployError::Executor(_)
+        | DeployError::PriorStateMismatch(_)
+        | DeployError::TargetUnavailable(_)
+        | DeployError::PolicyRejected(_)
+        | DeployError::PostWrite(_) => GateError::Connector(err.to_string()),
     }
 }
 
@@ -2565,8 +2586,9 @@ mod tool_invoke_policy_tests {
             fail: AtomicBool,
         }
 
+        #[async_trait::async_trait]
         impl DeployExecutor for Recording {
-            fn apply(
+            async fn apply(
                 &self,
                 _: &DeployRequest,
                 _: &[u8],
@@ -2581,7 +2603,7 @@ mod tool_invoke_policy_tests {
                     observed_state_sha256: "0".repeat(64),
                 })
             }
-            fn remove(
+            async fn remove(
                 &self,
                 _: &DeployRequest,
             ) -> Result<DeployEffect, crate::deploy::DeployError> {
@@ -2908,6 +2930,95 @@ mod tool_invoke_policy_tests {
             let open = f.state.operations.unresolved_deploys().unwrap();
             assert_eq!(open.len(), 1);
             assert_eq!(open[0].state, "uncertain");
+        }
+
+        /// Swap the recording stand-in for the real HTTP executor on a live
+        /// in-process fixture target, and stage the slice-3 policy artifact.
+        async fn with_real_executor(f: &mut Fixture) -> (String, tokio::task::JoinHandle<()>) {
+            use crate::deploy::{HttpPolicyExecutor, TargetEndpoints};
+            let (base_url, server) = membrane_proof_target::spawn_ephemeral(None).await.unwrap();
+            let (inventory, endpoints) =
+                TargetEndpoints::parse(&format!("target-a={base_url}")).unwrap();
+            let executor = HttpPolicyExecutor::new(endpoints).unwrap();
+            f.state.deploy = Some(Arc::new(DeployConnector::new(
+                inventory,
+                f.store.clone(),
+                Arc::new(executor),
+            )));
+            (base_url, server)
+        }
+
+        fn default_target_state() -> String {
+            use sha2::{Digest, Sha256};
+            crate::deploy::target_state_digest(
+                &hex::encode(Sha256::digest([])),
+                crate::deploy::PROOF_TARGET_IMAGE,
+            )
+        }
+
+        #[tokio::test]
+        async fn real_executor_changes_target_behavior_through_the_route() {
+            let mut f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let (base_url, _server) = with_real_executor(&mut f).await;
+            let digest = f
+                .store
+                .stage(br#"{"schema_version":1,"max_count":100}"#)
+                .unwrap();
+            let mut req = deploy_request(&digest);
+            req.expected_prior_state_sha256 = default_target_state();
+
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["status"], "allowed");
+            assert!(f.state.operations.unresolved_deploys().unwrap().is_empty());
+
+            // The mitigation is live on the target: 101 refused, 1 still ok.
+            let client = reqwest::Client::new();
+            let refused = client
+                .post(format!("{base_url}/evaluate"))
+                .json(&json!({"count": 101}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), 422);
+            let ok: serde_json::Value = client
+                .post(format!("{base_url}/evaluate"))
+                .json(&json!({"count": 1}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(ok["ok"], true);
+        }
+
+        #[tokio::test]
+        async fn prior_state_mismatch_through_the_route_is_blocked_not_uncertain() {
+            let mut f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let (_base_url, _server) = with_real_executor(&mut f).await;
+            let digest = f
+                .store
+                .stage(br#"{"schema_version":1,"max_count":100}"#)
+                .unwrap();
+            let mut req = deploy_request(&digest);
+            // The request reviewed a different prior state than the target has.
+            req.expected_prior_state_sha256 = "9".repeat(64);
+
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            // Refused before any write: no reservation stays open.
+            assert!(f.state.operations.unresolved_deploys().unwrap().is_empty());
         }
 
         #[tokio::test]
