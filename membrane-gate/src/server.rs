@@ -14,6 +14,7 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::deploy::DeployRequest;
 use crate::github::{is_github_tool, GitHubConnector, ToolInvokeRequest};
 use crate::proxy::{ChatRequest, ChatResponse, LlmProxy};
 use crate::watchdog::spawn_delta_t_watchdog;
@@ -40,6 +41,10 @@ pub struct GateServerState {
     pub session_chain: Arc<Mutex<SessionChainState>>,
     /// GitHub connector (operator installs). Demo dashboard does not use this.
     pub github: Arc<GitHubConnector>,
+    /// Deploy connector for `deploy.apply` / `deploy.remove`. None means deploy
+    /// calls fail closed; no real executor ships until the executor slice, so
+    /// the CLI does not construct one yet.
+    pub deploy: Option<Arc<crate::deploy::DeployConnector>>,
     pub operations: Arc<crate::operations::OperationJournal>,
     pub audit: Arc<crate::audit::AuditLog>,
     /// Paid Routstr calls. None means the spend route is off and denies everything.
@@ -80,6 +85,7 @@ pub async fn run_gate_server(state: GateServerState, listen: &str) -> anyhow::Re
         .route("/v1/operator/iac", post(operator_iac))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/tools/invoke", post(tools_invoke))
+        .route("/v1/deploy/invoke", post(deploy_invoke))
         .route("/v1/spend/chat", post(spend_chat))
         .route("/v1/approvals", get(approvals_list))
         .route("/v1/approvals/{id}/decision", post(approvals_decide))
@@ -390,6 +396,207 @@ async fn hold_or_resume(
                 (&req.tool, &target),
                 now,
             ) {
+                return fail(state, e);
+            }
+            let request = serde_json::to_value(req).unwrap_or_default();
+            let (approval, fresh) = match store.open_hold(
+                &hash,
+                caller,
+                &iac.scope_id,
+                &req.tool,
+                &target,
+                request,
+                now,
+                policy.ttl_secs,
+                &iac_hash,
+                &snapshot.digest,
+            ) {
+                Ok(v) => v,
+                Err(e) => return fail(state, e),
+            };
+            if fresh {
+                record_approval_event(state, "approval.held", &approval, Some(caller));
+                let reason = format!(
+                    "held for approval {}: {} on {}",
+                    approval.id, req.tool, target
+                );
+                publish_blocked_receipt(
+                    state,
+                    headers,
+                    Some(&req.model),
+                    Some(&req.tool),
+                    &GateError::ToolDenied(reason),
+                )
+                .await;
+            }
+            Some(held_response(&approval, now))
+        }
+    }
+}
+
+/// Production deploy route: `deploy.apply` / `deploy.remove` with typed fields,
+/// the same caller authentication as the GitHub route, deploy-target
+/// authorization, an operator hold bound to the exact typed request and a
+/// pre-dispatch recheck of policy, caller, time and artifact bytes.
+async fn deploy_invoke(
+    State(state): State<GateServerState>,
+    headers: HeaderMap,
+    request: Result<Json<DeployRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Some(response) = require_edge_assertion(&state, &headers, "deploy").await {
+        return response;
+    }
+    let req = match request {
+        Ok(Json(req)) => req,
+        Err(rejection) => {
+            record_denied(
+                &state,
+                &GateError::Registry("invalid JSON request".into()),
+                "deploy",
+            );
+            return rejection.into_response();
+        }
+    };
+    let mut identity = None;
+    let authorization: Result<(), GateError> = (|| {
+        let iac = load_iac(&headers, state.default_iac.as_ref())?;
+        let proof = load_caller_proof(&headers)?;
+        let caller =
+            state
+                .gate
+                .authenticate_caller(&iac, &proof, "/v1/deploy/invoke", &req, now_secs())?;
+        identity = Some(caller);
+        req.validate().map_err(map_deploy_err)?;
+        for target in &req.targets {
+            state.gate.authorize_deploy_at(
+                identity.as_deref().unwrap(),
+                &iac,
+                &req.model,
+                &req.tool,
+                target,
+                now_secs(),
+                false,
+            )?;
+        }
+        Ok(())
+    })();
+    if let Err(err) = authorization {
+        if let Some(caller) = identity.as_deref() {
+            if let Some(response) =
+                hold_or_resume_deploy(&state, &headers, &req, caller, &err).await
+            {
+                return response;
+            }
+            publish_blocked_receipt(&state, &headers, Some(&req.model), Some(&req.tool), &err)
+                .await;
+        }
+        record_denied_identity(&state, &err, "deploy", identity);
+        return gate_error_response(err);
+    }
+    dispatch_deploy_invoke(&state, &headers, &req, identity, None).await
+}
+
+async fn dispatch_deploy_invoke(
+    state: &GateServerState,
+    headers: &HeaderMap,
+    req: &DeployRequest,
+    identity: Option<String>,
+    approval: Option<&crate::approval::Approval>,
+) -> Response {
+    let mut authorized = false;
+    match handle_deploy_invoke(state, headers, req, &mut authorized, approval).await {
+        Ok((body, receipt)) => tool_success_response(body, &receipt),
+        Err(err) => {
+            if !authorized {
+                record_denied_identity(state, &err, "deploy", identity.clone());
+            }
+            if authorized {
+                // Dispatch has begun. An executor or journal failure here is an
+                // uncertain outcome, never a blocked one; no blind retry.
+                return (StatusCode::BAD_GATEWAY, Json(json!({
+                    "ok": false, "status": "uncertain", "operation_id": req.operation_id,
+                    "error": err.to_string(), "message": "Reconcile target state before retrying this operation."
+                }))).into_response();
+            }
+            publish_blocked_receipt(state, headers, Some(&req.model), Some(&req.tool), &err).await;
+            gate_error_response(err)
+        }
+    }
+}
+
+/// Same hold semantics as `hold_or_resume`, bound to the typed deploy request:
+/// the approval hash covers every deploy field, the caller, the IAC and the
+/// exact policy under which the hold opened. Returns None when approval gates
+/// do not apply.
+async fn hold_or_resume_deploy(
+    state: &GateServerState,
+    headers: &HeaderMap,
+    req: &DeployRequest,
+    caller: &str,
+    err: &GateError,
+) -> Option<Response> {
+    use crate::approval::Resolution;
+    let store = state.approvals.as_ref()?;
+    let policy = state.gate.registry().approval.as_ref()?;
+    if !matches!(err, GateError::ToolDenied(t) if *t == req.tool) || !policy.holds(&req.tool) {
+        return None;
+    }
+    let iac = load_iac(headers, state.default_iac.as_ref()).ok()?;
+    let now = now_secs();
+    let target = req.targets.join(",");
+    let fail = |state: &GateServerState, e: GateError| {
+        record_denied_identity(state, &e, "deploy", Some(caller.to_string()));
+        Some(gate_error_response(e))
+    };
+    let snapshot = match state.gate.policy_snapshot(caller) {
+        Ok(snapshot) => snapshot,
+        Err(e) => return fail(state, e),
+    };
+    let iac_hash = match iac.hash_hex() {
+        Ok(hash) => hash,
+        Err(e) => return fail(state, GateError::Registry(e.to_string())),
+    };
+    let hash =
+        match crate::approval::call_hash(caller, &iac.scope_id, &iac_hash, &snapshot.digest, req) {
+            Ok(h) => h,
+            Err(e) => return fail(state, e),
+        };
+    // Everything except the tool allowlist is checked now and again at dispatch,
+    // so an approval never widens scope, channels, model, targets or the window.
+    let recheck = |pre_approved: bool| {
+        req.targets.iter().try_for_each(|target| {
+            state.gate.authorize_deploy_at(
+                caller,
+                &iac,
+                &req.model,
+                &req.tool,
+                target,
+                now,
+                pre_approved,
+            )
+        })
+    };
+    match store.resolve(&hash, now) {
+        Err(e) => fail(state, e),
+        Ok(Resolution::Approved(approval)) => {
+            if let Err(e) = recheck(true) {
+                return fail(state, e);
+            }
+            record_approval_event(state, "approval.consumed", &approval, Some(caller));
+            Some(
+                dispatch_deploy_invoke(
+                    state,
+                    headers,
+                    req,
+                    Some(caller.to_string()),
+                    Some(&approval),
+                )
+                .await,
+            )
+        }
+        Ok(Resolution::Pending(approval)) => Some(held_response(&approval, now)),
+        Ok(Resolution::None) => {
+            if let Err(e) = recheck(true) {
                 return fail(state, e);
             }
             let request = serde_json::to_value(req).unwrap_or_default();
@@ -1236,6 +1443,224 @@ async fn handle_tool_invoke_with(
     Ok((body, receipt))
 }
 
+/// `approval` is an operator-approved, already-consumed hold for exactly this
+/// typed request. It waives only the tool-allowlist check, and its evidence is
+/// hashed into the receipt. Mirrors `handle_tool_invoke_with`.
+async fn handle_deploy_invoke(
+    state: &GateServerState,
+    headers: &HeaderMap,
+    req: &DeployRequest,
+    authorized: &mut bool,
+    approval: Option<&crate::approval::Approval>,
+) -> Result<(serde_json::Value, SessionReceipt), GateError> {
+    let iac = load_iac(headers, state.default_iac.as_ref())?;
+    let now = now_secs();
+
+    state.gate.validate_iac(Some(&iac), now)?;
+    state.gate.siem_admission()?;
+
+    // One consistent read of the policy for this request. The receipt binds its
+    // digest; dispatch refuses the call if the policy has changed since.
+    let snapshot = match iac.caller_pubkey.as_deref() {
+        Some(identity) => Some(state.gate.policy_snapshot(identity)?),
+        None => None,
+    };
+
+    if !iac.model_allowed(&req.model) || !state.gate.registry().model_allowlist.contains(&req.model)
+    {
+        return Err(GateError::ModelDenied(req.model.clone()));
+    }
+
+    req.validate().map_err(map_deploy_err)?;
+
+    let caller = iac.caller_pubkey.as_deref().unwrap_or("");
+    if approval.is_some() {
+        state.gate.validate_iac(Some(&iac), now)?;
+    } else if let Some(snapshot) = &snapshot {
+        for target in &req.targets {
+            state.gate.authorize_deploy_with_snapshot(
+                snapshot, &iac, &req.model, &req.tool, target, now, false,
+            )?;
+        }
+    }
+
+    // Deploy calls fail closed without a connector; the real executor is a
+    // later slice, so production builds do not construct one yet.
+    let connector = state.deploy.as_ref().ok_or_else(|| {
+        GateError::Connector(format!(
+            "no connector configured for tool '{}'; supported: deploy.apply, deploy.remove",
+            req.tool
+        ))
+    })?;
+    connector.preflight(req).map_err(map_deploy_err)?;
+
+    // Serialize validation, intent publication and dispatch with sever/staleness
+    // changes. The receipt attests the request intent, not a completed effect.
+    let mut chain = state.session_chain.lock().await;
+    ensure_live_session(state, &iac, &mut chain, now).await?;
+    let parent_cp_hash = chain.next_parent_cp_hash(&iac.parent_cp_hash);
+    let session_nonce = chain
+        .session_nonce
+        .checked_add(1)
+        .ok_or_else(|| GateError::Connector("scope nonce exhausted".into()))?;
+    let prev_event_id = chain.last_event_id.clone();
+    let mut context_chunks =
+        vec![serde_json::to_vec(req).map_err(|e| GateError::Registry(e.to_string()))?];
+    if let Some(a) = approval {
+        context_chunks.push(
+            serde_json::to_vec(&json!({
+                "approval_id": a.id,
+                "call_hash": a.call_hash,
+                "decided_by": a.decided_by,
+                "decided_at": a.decided_at,
+            }))
+            .map_err(|e| GateError::Registry(e.to_string()))?,
+        );
+    }
+
+    // Durable reservation before any dispatch path: one operation ID is used
+    // once per caller across every tool, and an uncertain outcome stays
+    // reserved for read-only reconciliation.
+    let reservation = state
+        .operations
+        .reserve_deploy_in_scope(caller, &iac.scope_id, req)?;
+    let publication = state.operations.begin_publication()?;
+    let outcome = state
+        .gate
+        .open_router_session(
+            Some(&iac),
+            RouterSessionRequest {
+                model_id: req.model.clone(),
+                context_chunks,
+                session_nonce,
+                parent_cp_hash: parent_cp_hash.clone(),
+                scope_id: Some(iac.scope_id.clone()),
+                tool_id: Some(req.tool.clone()),
+                policy_digest: snapshot.as_ref().map(|s| s.digest.clone()),
+                policy_revision: snapshot.as_ref().map(|s| s.revision),
+            },
+            now,
+            prev_event_id.as_deref(),
+        )
+        .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            if !matches!(err, GateError::Bus(_)) {
+                state
+                    .operations
+                    .append(crate::operations::Record::PublicationAborted { token: publication })?;
+                *chain = state
+                    .operations
+                    .recover(&state.gate.publisher_pubkey_hex())?
+                    .chain;
+            }
+            return Err(err);
+        }
+    };
+
+    let cp_hash = cp_hash_hex(&outcome.event).map_err(GateError::Bus)?;
+    state
+        .operations
+        .append(crate::operations::Record::Checkpoint {
+            token: publication,
+            caller: iac.caller_pubkey.clone().unwrap_or_default(),
+            event: outcome.event.clone(),
+            bus_event_id: outcome.bus_event_id.clone(),
+        })?;
+    chain.session_nonce = session_nonce;
+    chain.record_cp(cp_hash.clone(), outcome.bus_event_id.clone(), now);
+
+    let receipt = SessionReceipt {
+        scope_id: iac.scope_id.clone(),
+        session_nonce,
+        cp_hash: cp_hash.clone(),
+        context_merkle_root: outcome.context_merkle_root.clone(),
+        parent_cp_hash,
+        bus_event_id: outcome.bus_event_id.clone(),
+        policy_digest: snapshot.as_ref().map(|s| s.digest.clone()),
+        policy_revision: snapshot.as_ref().map(|s| s.revision),
+    };
+
+    // Publication may have taken time; recheck policy, caller, time window and
+    // the artifact bytes immediately before dispatch, still under the lock.
+    let pre_dispatch = (|| -> Result<(), GateError> {
+        state.gate.validate_iac(Some(&iac), now_secs())?;
+        state
+            .gate
+            .check_session_liveness(&chain, &iac.scope_id, now_secs())?;
+        let caller = iac
+            .caller_pubkey
+            .as_deref()
+            .ok_or_else(|| GateError::IdentityAuthentication("missing caller binding".into()))?;
+        // Dispatch under the policy the receipt names: if a registry install or
+        // a restart changed it since the intent was published, refuse; the
+        // caller retries under a fresh snapshot.
+        let snapshot = snapshot
+            .as_ref()
+            .ok_or_else(|| GateError::Registry("policy snapshot missing".into()))?;
+        let fresh = state.gate.dispatch_snapshot(snapshot, caller)?;
+        for target in &req.targets {
+            state.gate.authorize_deploy_with_snapshot(
+                &fresh,
+                &iac,
+                &req.model,
+                &req.tool,
+                target,
+                now_secs(),
+                approval.is_some(),
+            )?;
+        }
+        // Re-hash the approved artifact bytes (execute hashes them once more).
+        connector.reverify(req).map_err(map_deploy_err)?;
+        Ok(())
+    })();
+    if let Err(err) = pre_dispatch {
+        // Refused before dispatch: close the reservation as refused. Nothing
+        // ran on a target, so there is nothing to reconcile.
+        state.operations.finish_refused(&reservation)?;
+        return Err(err);
+    }
+    *authorized = true;
+    record_allowed(state, &iac, "deploy");
+    let execution = connector.execute(req);
+    state.operations.finish(&reservation, execution.is_ok())?;
+    let tool_ctx = execution.map_err(map_deploy_err)?;
+
+    info!(
+        scope_id = %iac.scope_id,
+        tool = %req.tool,
+        cp_hash = %cp_hash,
+        "membrane deploy invoke allowed"
+    );
+
+    let body = json!({
+        "ok": true,
+        "status": "allowed",
+        "simulation": false,
+        "tool": req.tool,
+        "model": req.model,
+        "operation_id": req.operation_id,
+        "artifact_sha256": req.artifact_sha256,
+        "targets": req.targets,
+        "expected_prior_state_sha256": req.expected_prior_state_sha256,
+        "test_report_sha256": req.test_report_sha256,
+        "observed_state_sha256": tool_ctx.effect.observed_state_sha256,
+        "receipt": {
+            "scope_id": receipt.scope_id,
+            "session_nonce": receipt.session_nonce,
+            "cp_hash": receipt.cp_hash,
+            "context_merkle_root": receipt.context_merkle_root,
+            "parent_cp_hash": receipt.parent_cp_hash,
+            "bus_event_id": receipt.bus_event_id,
+            "policy_digest": receipt.policy_digest,
+            "policy_revision": receipt.policy_revision,
+        }
+    });
+
+    Ok((body, receipt))
+}
+
 async fn ensure_live_session(
     state: &GateServerState,
     iac: &IntentAuthorizationCredential,
@@ -1321,6 +1746,25 @@ fn apply_operator_severs(
         if let (Some(reason), Some(scope)) = (reason, scope) {
             chain.mark_degraded(&scope, &reason, event.timestamp);
         }
+    }
+}
+
+fn map_deploy_err(err: crate::deploy::DeployError) -> GateError {
+    use crate::deploy::DeployError;
+    match err {
+        DeployError::UnsupportedTool(t) => {
+            GateError::Connector(format!("unsupported deploy tool: {t}"))
+        }
+        DeployError::SchemaVersion(v) => {
+            GateError::Registry(format!("unsupported deploy schema version: {v}"))
+        }
+        DeployError::InvalidArgs(m) => GateError::Registry(m),
+        // Same denial the gate returns when a deploy target misses an allowlist.
+        DeployError::TargetDenied(t) => GateError::RepoDenied(t),
+        DeployError::ArtifactMissing(_)
+        | DeployError::ArtifactDigestMismatch(_)
+        | DeployError::Store(_)
+        | DeployError::Executor(_) => GateError::Connector(err.to_string()),
     }
 }
 
@@ -1700,6 +2144,7 @@ mod tool_invoke_policy_tests {
                 std::env::temp_dir().join(Keys::generate().public_key().to_hex()),
             )),
             audit: Arc::new(crate::audit::AuditLog::default()),
+            deploy: None,
             spend: None,
             approvals: None,
         };
@@ -2099,6 +2544,558 @@ mod tool_invoke_policy_tests {
             // taken from.
             assert_eq!(body["receipt"]["policy_revision"], serde_json::json!(0));
             server.abort();
+        }
+    }
+
+    mod deploy_route {
+        use super::*;
+        use crate::approval::{ApprovalPolicy, ApprovalStore};
+        use crate::deploy::{
+            ArtifactStore, DeployConnector, DeployEffect, DeployExecutor, TargetInventory,
+            DEPLOY_SCHEMA_VERSION, TOOL_DEPLOY_APPLY, TOOL_DEPLOY_REMOVE,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        /// Test stand-in only. It records calls so refusal tests can assert the
+        /// executor was never reached; it writes nothing to any target.
+        #[derive(Default)]
+        struct Recording {
+            applies: AtomicUsize,
+            removes: AtomicUsize,
+            fail: AtomicBool,
+        }
+
+        impl DeployExecutor for Recording {
+            fn apply(
+                &self,
+                _: &DeployRequest,
+                _: &[u8],
+            ) -> Result<DeployEffect, crate::deploy::DeployError> {
+                self.applies.fetch_add(1, Ordering::SeqCst);
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(crate::deploy::DeployError::Executor(
+                        "write timed out".into(),
+                    ));
+                }
+                Ok(DeployEffect {
+                    observed_state_sha256: "0".repeat(64),
+                })
+            }
+            fn remove(
+                &self,
+                _: &DeployRequest,
+            ) -> Result<DeployEffect, crate::deploy::DeployError> {
+                self.removes.fetch_add(1, Ordering::SeqCst);
+                Ok(DeployEffect {
+                    observed_state_sha256: "1".repeat(64),
+                })
+            }
+        }
+
+        struct Fixture {
+            dir: std::path::PathBuf,
+            state: GateServerState,
+            exec: Arc<Recording>,
+            store: ArtifactStore,
+            digest: String,
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        /// A gate with a deploy connector wired to the recording stand-in.
+        /// `tools` is the caller's tool grant; targets are the registry and
+        /// grant deploy_target_allowlist values.
+        fn fixture(
+            tools: Vec<String>,
+            holdable: Option<Vec<String>>,
+            registry_targets: Vec<String>,
+            grant_targets: Vec<String>,
+        ) -> Fixture {
+            let (mut state, _) = test_state(tools, vec!["acme/pilot".into()]);
+            let mut registry = state.gate.registry().clone();
+            registry.deploy_target_allowlist = registry_targets;
+            for grant in registry.identities.values_mut() {
+                grant.deploy_target_allowlist = grant_targets.clone();
+            }
+            if let Some(holdable) = holdable {
+                registry.approval = Some(ApprovalPolicy {
+                    holdable_tools: holdable,
+                    ttl_secs: 600,
+                });
+                state.approvals = Some(Arc::new(ApprovalStore::in_memory()));
+            }
+            state.gate = Arc::new(Gate::new(
+                registry,
+                BusPublisher::new(BusPublisherConfig {
+                    relay_url: "memory://tool-policy".into(),
+                    keys: state.gate.publisher().keys().clone(),
+                }),
+            ));
+            let dir = std::env::temp_dir().join(format!(
+                "membrane-deploy-route-{}",
+                Keys::generate().public_key().to_hex()
+            ));
+            let store = ArtifactStore::open(dir.join("artifacts")).unwrap();
+            let digest = store.stage(b"mitigation-v1").unwrap();
+            let exec = Arc::new(Recording::default());
+            state.deploy = Some(Arc::new(DeployConnector::new(
+                TargetInventory::new(vec!["target-a".to_string(), "target-b".to_string()]).unwrap(),
+                store.clone(),
+                exec.clone(),
+            )));
+            Fixture {
+                dir,
+                state,
+                exec,
+                store,
+                digest,
+            }
+        }
+
+        fn deploy_request(digest: &str) -> DeployRequest {
+            DeployRequest {
+                schema_version: DEPLOY_SCHEMA_VERSION,
+                tool: TOOL_DEPLOY_APPLY.into(),
+                operation_id: "op-0001".into(),
+                model: "demo".into(),
+                artifact_sha256: digest.into(),
+                targets: vec!["target-a".into()],
+                expected_prior_state_sha256: "a".repeat(64),
+                test_report_sha256: "b".repeat(64),
+            }
+        }
+
+        fn proof_for(state: &GateServerState, req: &DeployRequest, nonce: String) -> String {
+            let proof = membrane_core::caller::CallerProof::sign(
+                state.gate.publisher().keys(),
+                &state.gate.caller_audience(),
+                "/v1/deploy/invoke",
+                req,
+                state.default_iac.as_ref().unwrap(),
+                now_secs(),
+                nonce,
+            )
+            .unwrap();
+            serde_json::to_string(&proof).unwrap()
+        }
+
+        async fn send(
+            state: &GateServerState,
+            req: &DeployRequest,
+        ) -> (StatusCode, serde_json::Value) {
+            let nonce = Keys::generate().public_key().to_hex();
+            send_with(state, req, proof_for(state, req, nonce)).await
+        }
+
+        async fn send_with(
+            state: &GateServerState,
+            req: &DeployRequest,
+            proof: String,
+        ) -> (StatusCode, serde_json::Value) {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-membrane-caller-proof", proof.parse().unwrap());
+            let response =
+                deploy_invoke(State(state.clone()), headers, Ok(Json(req.clone()))).await;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(json!(null)),
+            )
+        }
+
+        fn applies(f: &Fixture) -> usize {
+            f.exec.applies.load(Ordering::SeqCst)
+        }
+
+        #[tokio::test]
+        async fn permitted_apply_dispatches_once_with_receipt_and_completed_journal() {
+            let f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let (status, body) = send(&f.state, &deploy_request(&f.digest)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["status"], "allowed");
+            assert_eq!(body["simulation"], false);
+            assert_eq!(applies(&f), 1);
+            assert_eq!(body["receipt"]["policy_digest"].as_str().unwrap().len(), 64);
+            assert_eq!(body["receipt"]["session_nonce"], 1);
+            // The durable reservation closed as completed.
+            assert!(f.state.operations.unresolved_deploys().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn remove_is_its_own_tool_and_needs_no_staged_artifact() {
+            let f = fixture(
+                vec![TOOL_DEPLOY_REMOVE.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let mut req = deploy_request(&f.digest);
+            req.tool = TOOL_DEPLOY_REMOVE.into();
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(f.exec.removes.load(Ordering::SeqCst), 1);
+            assert_eq!(applies(&f), 0);
+        }
+
+        #[tokio::test]
+        async fn target_must_be_in_registry_and_grant_lists() {
+            for (registry_targets, grant_targets) in [
+                (vec!["target-a".to_string()], vec![]),
+                (vec![], vec!["target-a".to_string()]),
+                (vec!["target-b".to_string()], vec!["target-b".to_string()]),
+            ] {
+                let f = fixture(
+                    vec![TOOL_DEPLOY_APPLY.into()],
+                    None,
+                    registry_targets,
+                    grant_targets,
+                );
+                let (status, body) = send(&f.state, &deploy_request(&f.digest)).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+                assert_eq!(body["status"], "blocked");
+                assert_eq!(applies(&f), 0);
+            }
+        }
+
+        #[tokio::test]
+        async fn repo_allowlist_entry_cannot_authorize_a_deploy() {
+            // acme/pilot is an allowed GitHub repo for this caller; naming it as
+            // a deploy target is not even a plain inventory ID.
+            let f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let mut req = deploy_request(&f.digest);
+            req.targets = vec!["acme/pilot".into()];
+            // A repo-style name is not a plain inventory ID, so the request is
+            // malformed; the cross-list property itself is covered by the
+            // identity tests (a repo entry never authorizes a deploy).
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(applies(&f), 0);
+        }
+
+        #[tokio::test]
+        async fn expired_grant_window_denies() {
+            let mut f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let mut registry = f.state.gate.registry().clone();
+            for grant in registry.identities.values_mut() {
+                grant.not_before = Some(now_secs() - 600);
+                grant.expires_at = Some(now_secs() - 60);
+            }
+            f.state.gate = Arc::new(Gate::new(
+                registry,
+                BusPublisher::new(BusPublisherConfig {
+                    relay_url: "memory://tool-policy".into(),
+                    keys: f.state.gate.publisher().keys().clone(),
+                }),
+            ));
+            let (status, body) = send(&f.state, &deploy_request(&f.digest)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(applies(&f), 0);
+        }
+
+        #[tokio::test]
+        async fn caller_proof_binds_the_typed_request() {
+            let f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let req = deploy_request(&f.digest);
+            let proof = proof_for(&f.state, &req, Keys::generate().public_key().to_hex());
+            // The wire request changes one field after the proof was signed.
+            let mut swapped = req.clone();
+            swapped.artifact_sha256 = "d".repeat(64);
+            let (status, body) = send_with(&f.state, &swapped, proof).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("authentication"));
+            assert_eq!(applies(&f), 0);
+        }
+
+        #[tokio::test]
+        async fn replayed_proof_is_rejected() {
+            let f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let req = deploy_request(&f.digest);
+            let proof = proof_for(&f.state, &req, Keys::generate().public_key().to_hex());
+            let (status, _) = send_with(&f.state, &req, proof.clone()).await;
+            assert_eq!(status, StatusCode::OK);
+            let (status, body) = send_with(&f.state, &req, proof).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_eq!(applies(&f), 1);
+        }
+
+        #[tokio::test]
+        async fn no_connector_fails_closed() {
+            let mut f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            f.state.deploy = None;
+            let (status, body) = send(&f.state, &deploy_request(&f.digest)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("no connector configured"));
+        }
+
+        #[tokio::test]
+        async fn operation_id_cannot_be_reused_after_completion() {
+            let f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let (status, _) = send(&f.state, &deploy_request(&f.digest)).await;
+            assert_eq!(status, StatusCode::OK);
+            // A fresh proof over the identical request: the completed operation
+            // ID stays reserved, so this never dispatches again.
+            let (status, body) = send(&f.state, &deploy_request(&f.digest)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("already reserved"));
+            assert_eq!(applies(&f), 1);
+        }
+
+        #[tokio::test]
+        async fn executor_failure_is_uncertain_not_a_denial() {
+            let f = fixture(
+                vec![TOOL_DEPLOY_APPLY.into()],
+                None,
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            f.exec.fail.store(true, Ordering::SeqCst);
+            let (status, body) = send(&f.state, &deploy_request(&f.digest)).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+            assert_eq!(body["status"], "uncertain");
+            assert_eq!(body["operation_id"], "op-0001");
+            // The write stays reserved for read-only reconciliation.
+            let open = f.state.operations.unresolved_deploys().unwrap();
+            assert_eq!(open.len(), 1);
+            assert_eq!(open[0].state, "uncertain");
+        }
+
+        #[tokio::test]
+        async fn out_of_scope_deploy_is_held_then_runs_once_after_approval() {
+            let f = fixture(
+                vec![],
+                Some(vec![TOOL_DEPLOY_APPLY.into()]),
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let req = deploy_request(&f.digest);
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["status"], "held");
+            assert_eq!(applies(&f), 0);
+            // Retrying while pending does not open a second hold or dispatch.
+            let (status, _) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let items = f.state.approvals.as_ref().unwrap().list().unwrap();
+            assert_eq!(items.len(), 1);
+            let hold = items[0].clone();
+            // The hold stores the exact typed request for the operator.
+            assert_eq!(hold.tool, TOOL_DEPLOY_APPLY);
+            assert_eq!(hold.target, "target-a");
+            assert_eq!(hold.request["artifact_sha256"], json!(f.digest));
+            f.state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&hold.id, true, "oncall", None, now_secs())
+                .unwrap();
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(applies(&f), 1);
+            assert_eq!(body["receipt"]["policy_digest"], json!(hold.policy_digest));
+            // The approval was one call. The next identical call is held again.
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(applies(&f), 1);
+        }
+
+        #[tokio::test]
+        async fn approval_covers_only_the_exact_typed_request() {
+            let f = fixture(
+                vec![],
+                Some(vec![TOOL_DEPLOY_APPLY.into()]),
+                vec!["target-a".into(), "target-b".into()],
+                vec!["target-a".into(), "target-b".into()],
+            );
+            let req = deploy_request(&f.digest);
+            send(&f.state, &req).await;
+            let items = f.state.approvals.as_ref().unwrap().list().unwrap();
+            f.state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&items[0].id, true, "oncall", None, now_secs())
+                .unwrap();
+            // A different artifact or target does not match the approval: each
+            // opens a fresh hold and nothing dispatches.
+            let mut other_artifact = req.clone();
+            other_artifact.artifact_sha256 = "d".repeat(64);
+            let mut other_target = req.clone();
+            other_target.targets = vec!["target-b".into()];
+            for changed in [other_artifact, other_target] {
+                let (status, body) = send(&f.state, &changed).await;
+                assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            }
+            assert_eq!(applies(&f), 0);
+            assert_eq!(f.state.approvals.as_ref().unwrap().list().unwrap().len(), 3);
+        }
+
+        #[tokio::test]
+        async fn bytes_swapped_after_approval_are_refused_pre_dispatch() {
+            let f = fixture(
+                vec![],
+                Some(vec![TOOL_DEPLOY_APPLY.into()]),
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let req = deploy_request(&f.digest);
+            send(&f.state, &req).await;
+            let items = f.state.approvals.as_ref().unwrap().list().unwrap();
+            f.state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&items[0].id, true, "oncall", None, now_secs())
+                .unwrap();
+            // The approved digest now names different bytes than the operator saw.
+            std::fs::write(f.store.root().join(&f.digest), b"evil-bytes").unwrap();
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("do not match approved digest"));
+            assert_eq!(applies(&f), 0);
+            // Refused before dispatch: the reservation is closed, not left for
+            // reconciliation, and the refusal is on the journal.
+            assert!(f.state.operations.unresolved_deploys().unwrap().is_empty());
+            let records = f.state.operations.records().unwrap();
+            assert!(records.iter().any(|r| matches!(
+                r,
+                crate::operations::Record::Outcome { state, .. } if state == "refused"
+            )));
+        }
+
+        #[tokio::test]
+        async fn policy_change_between_approval_and_retry_requires_a_fresh_hold() {
+            let mut f = fixture(
+                vec![],
+                Some(vec![TOOL_DEPLOY_APPLY.into()]),
+                vec!["target-a".into()],
+                vec!["target-a".into()],
+            );
+            let dir = std::env::temp_dir().join(format!(
+                "membrane-deploy-policy-{}",
+                Keys::generate().public_key().to_hex()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("registry.yaml");
+            std::fs::write(
+                &path,
+                serde_yaml::to_string(f.state.gate.registry()).unwrap(),
+            )
+            .unwrap();
+            crate::policy::register_current_generation(&path).unwrap();
+            f.state.gate = Arc::new(
+                Gate::new(
+                    f.state.gate.registry().clone(),
+                    BusPublisher::new(BusPublisherConfig {
+                        relay_url: "memory://tool-policy".into(),
+                        keys: f.state.gate.publisher().keys().clone(),
+                    }),
+                )
+                .with_identity_registry_path(path.clone()),
+            );
+            let req = deploy_request(&f.digest);
+            let (status, _) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let items = f.state.approvals.as_ref().unwrap().list().unwrap();
+            let hold = items[0].clone();
+            f.state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&hold.id, true, "oncall", None, now_secs())
+                .unwrap();
+
+            // Policy changes between the approval and the retry: a new
+            // generation, the way the versioned update path requires.
+            let mut changed = f.state.gate.registry().clone();
+            changed.revision += 1;
+            changed.deploy_target_allowlist.push("target-b".into());
+            std::fs::write(&path, serde_yaml::to_string(&changed).unwrap()).unwrap();
+            crate::policy::register_current_generation(&path).unwrap();
+
+            // The approval no longer matches: held again, nothing dispatched,
+            // and the fresh hold names the new policy.
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(applies(&f), 0);
+            let items = f.state.approvals.as_ref().unwrap().list().unwrap();
+            assert_eq!(items.len(), 2);
+            let fresh_hold = items
+                .iter()
+                .find(|a| a.state == crate::approval::ApprovalState::Pending)
+                .unwrap()
+                .clone();
+            assert_ne!(fresh_hold.id, hold.id);
+            assert_ne!(fresh_hold.policy_digest, hold.policy_digest);
+
+            // Approving the fresh hold runs the call once under the new policy.
+            f.state
+                .approvals
+                .as_ref()
+                .unwrap()
+                .decide(&fresh_hold.id, true, "oncall", None, now_secs())
+                .unwrap();
+            let (status, body) = send(&f.state, &req).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(applies(&f), 1);
+            assert_eq!(
+                body["receipt"]["policy_digest"],
+                json!(fresh_hold.policy_digest)
+            );
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 

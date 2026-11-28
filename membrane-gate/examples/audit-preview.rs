@@ -92,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
             api_base: "http://127.0.0.1:1".into(),
             token: None,
         })),
+        deploy: None,
         audit,
         spend: None,
         approvals: None,

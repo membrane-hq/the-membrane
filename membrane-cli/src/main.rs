@@ -999,6 +999,8 @@ async fn gate_start(
         session_chain: Arc::new(tokio::sync::Mutex::new(session_chain)),
         operations,
         github: Arc::new(GitHubConnector::new(github_cfg)),
+        // No real deploy executor ships yet, so deploy calls fail closed.
+        deploy: None,
         audit: Arc::new(membrane_gate::audit::AuditLog::default()),
         spend: membrane_gate::routstr::SpendService::from_env()?.map(Arc::new),
         approvals,
